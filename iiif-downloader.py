@@ -59,9 +59,16 @@ def download_iiif_images(manifest_data, size=None, output_folder=None, resume=Fa
             response = requests.get(image_info_url, headers=headers)
             response.raise_for_status()  # Raise an exception for bad status codes
 
-            # Check if the content type is JSON
+            # Check if the content type is JSON (including JSON-LD and other JSON variants)
             content_type = response.headers.get("Content-Type", "")
-            if "application/json" not in content_type.lower():
+            json_types = [
+                "application/json",
+                "application/ld+json",
+                "application/vnd.api+json",
+                "text/json",
+                "application/javascript",
+            ]
+            if not any(json_type in content_type.lower() for json_type in json_types):
                 print(
                     f"Warning: The image info response doesn't seem to be JSON. Content-Type: {content_type}"
                 )

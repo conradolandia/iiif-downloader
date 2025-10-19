@@ -140,9 +140,18 @@ def download_iiif_images(
                 response = requests.get(image_info_url, headers=headers)
                 response.raise_for_status()
 
-                # Check if the content type is JSON
+                # Check if the content type is JSON (including JSON-LD and other JSON variants)
                 content_type = response.headers.get("Content-Type", "")
-                if "application/json" not in content_type.lower():
+                json_types = [
+                    "application/json",
+                    "application/ld+json",
+                    "application/vnd.api+json",
+                    "text/json",
+                    "application/javascript",
+                ]
+                if not any(
+                    json_type in content_type.lower() for json_type in json_types
+                ):
                     console.print(
                         f"[bold red]Warning:[/bold red] Image info response not JSON. Content-Type: {content_type}"
                     )
