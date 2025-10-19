@@ -87,24 +87,51 @@ jobs:
       run: |
         mkdir -p release-assets
 
+        # Debug: List what we have in artifacts
+        echo "=== Artifacts directory structure ==="
+        find artifacts/ -type f -name "iiif-downloader*" 2>/dev/null || echo "No iiif-downloader files found"
+        echo "=== All files in artifacts ==="
+        find artifacts/ -type f 2>/dev/null || echo "No files found"
+        echo "=== Directory listing ==="
+        ls -la artifacts/ 2>/dev/null || echo "No artifacts directory"
+
         # Process artifacts from all platforms
         for artifact_dir in artifacts/*/; do
           if [ -d "$artifact_dir" ]; then
             # Extract platform and Python version from artifact name
             artifact_name=$(basename "$artifact_dir")
             echo "Processing artifact: $artifact_name"
+            echo "Artifact directory contents:"
+            ls -la "$artifact_dir" 2>/dev/null || echo "Cannot list directory"
 
             # Look for executables in the artifact
-            if [ -f "$artifact_dir/dist/iiif-downloader" ]; then
-              # Unix executable (Linux/macOS)
+            if [ -f "$artifact_dir/iiif-downloader" ]; then
+              # Unix executable (Linux/macOS) - directly in artifact root
+              echo "Found Unix executable: $artifact_dir/iiif-downloader"
+              cp "$artifact_dir/iiif-downloader" "release-assets/iiif-downloader-$artifact_name"
+              chmod +x "release-assets/iiif-downloader-$artifact_name"
+            elif [ -f "$artifact_dir/iiif-downloader.exe" ]; then
+              # Windows executable - directly in artifact root
+              echo "Found Windows executable: $artifact_dir/iiif-downloader.exe"
+              cp "$artifact_dir/iiif-downloader.exe" "release-assets/iiif-downloader-$artifact_name.exe"
+            elif [ -f "$artifact_dir/dist/iiif-downloader" ]; then
+              # Unix executable (Linux/macOS) - in dist subdirectory
+              echo "Found Unix executable in dist: $artifact_dir/dist/iiif-downloader"
               cp "$artifact_dir/dist/iiif-downloader" "release-assets/iiif-downloader-$artifact_name"
               chmod +x "release-assets/iiif-downloader-$artifact_name"
             elif [ -f "$artifact_dir/dist/iiif-downloader.exe" ]; then
-              # Windows executable
+              # Windows executable - in dist subdirectory
+              echo "Found Windows executable in dist: $artifact_dir/dist/iiif-downloader.exe"
               cp "$artifact_dir/dist/iiif-downloader.exe" "release-assets/iiif-downloader-$artifact_name.exe"
+            else
+              echo "No executable found in $artifact_dir"
             fi
           fi
         done
+
+        # Debug: List what we created
+        echo "=== Final release assets ==="
+        ls -la release-assets/ 2>/dev/null || echo "No release assets created"
 
         # Create a comprehensive README for the release
         cat > release-assets/README.md << 'EOF'
