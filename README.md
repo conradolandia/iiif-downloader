@@ -15,6 +15,7 @@ A Python tool for downloading images from IIIF (International Image Interoperabi
 - Resume interrupted downloads
 - Extract and save manifest metadata
 - Configurable image sizes
+- Download single canvas/page with `--canvas` option
 - Build standalone executables
 
 ## Installation
@@ -70,6 +71,9 @@ iiif-downloader --source "https://example.com/manifest.json" --rate-limit 30
 
 # Disable adaptive rate limiting (use fixed base delay)
 iiif-downloader --source "https://example.com/manifest.json" --no-adaptive-rate
+
+# Download a single specific canvas/page (1-based index)
+iiif-downloader --source "https://example.com/manifest.json" --canvas 5
 ```
 
 ### Rate Limiting
@@ -101,6 +105,22 @@ When using `--resume`, the downloader:
 - Skips already downloaded images
 - Maintains fast O(1) lookups for existing files
 - Automatically detects and skips completed downloads
+
+### Single Canvas Download
+
+Use the `--canvas` option to download a specific page:
+- **1-based indexing**: Canvas 1 is the first page, canvas 2 is the second, etc.
+- **Validation**: Automatically validates the canvas index against available pages
+- **Progress tracking**: Shows progress for the single download
+- **Rate limiting**: Respects the same rate limiting as full downloads
+
+```bash
+# Download only the 5th page
+iiif-downloader --source "https://example.com/manifest.json" --canvas 5
+
+# Download with specific size and output folder
+iiif-downloader --source "https://example.com/manifest.json" --canvas 3 --size 2048 --output "page3"
+```
 
 ## Building Executable
 
@@ -164,6 +184,17 @@ iiif-downloader \
   --source "https://example.com/collection/manifest.json" \
   --rate-limit 20 \
   --output "collection_images"
+```
+
+### Download Single Page
+
+```bash
+# Download just the first page
+iiif-downloader \
+  --source "https://example.com/manuscript/manifest.json" \
+  --canvas 1 \
+  --size 2048 \
+  --output "first_page"
 ```
 
 ## License
