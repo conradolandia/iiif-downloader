@@ -24,7 +24,7 @@ jobs:
 
     - name: Install dependencies
       shell: bash
-      run: pixi install
+      run: pixi install --frozen
 
     - name: Run linting and formatting
       run: pixi run check

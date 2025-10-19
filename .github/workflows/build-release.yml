@@ -27,7 +27,7 @@ jobs:
 
     - name: Install dependencies
       shell: bash
-      run: pixi install
+      run: pixi install --frozen
 
     - name: Run tests
       shell: bash
@@ -76,7 +76,7 @@ jobs:
 
     - name: Install dependencies
       shell: bash
-      run: pixi install
+      run: pixi install --frozen
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
