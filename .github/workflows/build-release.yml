@@ -27,7 +27,7 @@ jobs:
 
     - name: Install dependencies
       shell: bash
-      run: pixi install --locked
+      run: pixi install
 
     - name: Run tests
       shell: bash
@@ -76,7 +76,7 @@ jobs:
 
     - name: Install dependencies
       shell: bash
-      run: pixi install --locked
+      run: pixi install
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
