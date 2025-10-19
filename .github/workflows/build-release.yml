@@ -8,14 +8,15 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
       packages: read
 
     strategy:
       matrix:
-        python-version: ['3.11', '3.12', '3.13']
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.12']
 
     steps:
     - name: Checkout code
@@ -25,23 +26,31 @@ jobs:
       uses: prefix-dev/setup-pixi@v0.9.1
 
     - name: Install dependencies
+      shell: bash
       run: pixi install
 
     - name: Run tests
+      shell: bash
       run: pixi run check
 
     - name: Build executable
+      shell: bash
       run: pixi run build-exe
 
     - name: Test executable
+      shell: bash
       run: |
-        ./dist/iiif-downloader --help
+        if [ "${{ matrix.os }}" = "windows-latest" ]; then
+          ./dist/iiif-downloader.exe --help
+        else
+          ./dist/iiif-downloader --help
+        fi
         echo "Executable test passed"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: iiif-downloader-${{ matrix.python-version }}-${{ github.sha }}
+        name: iiif-downloader-${{ matrix.os }}-${{ matrix.python-version }}-${{ github.sha }}
         path: dist/
         retention-days: 30
 
@@ -68,48 +77,67 @@ jobs:
     - name: Install dependencies
       run: pixi install
 
-    - name: Build release executable
-      run: pixi run build-exe
-
     - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
         path: artifacts/
 
     - name: Prepare release assets
+      shell: bash
       run: |
         mkdir -p release-assets
 
-        # Copy the main executable (built with Python 3.12)
-        cp dist/iiif-downloader release-assets/iiif-downloader-linux-x86_64
+        # Process artifacts from all platforms
+        for artifact_dir in artifacts/*/; do
+          if [ -d "$artifact_dir" ]; then
+            # Extract platform and Python version from artifact name
+            artifact_name=$(basename "$artifact_dir")
+            echo "Processing artifact: $artifact_name"
 
-        # Copy executables from other Python versions
-        for artifact in artifacts/*/; do
-          if [ -f "$artifact/dist/iiif-downloader" ]; then
-            python_version=$(basename "$artifact" | cut -d'-' -f2)
-            cp "$artifact/dist/iiif-downloader" "release-assets/iiif-downloader-linux-x86_64-python$python_version"
+            # Look for executables in the artifact
+            if [ -f "$artifact_dir/dist/iiif-downloader" ]; then
+              # Unix executable (Linux/macOS)
+              cp "$artifact_dir/dist/iiif-downloader" "release-assets/iiif-downloader-$artifact_name"
+              chmod +x "release-assets/iiif-downloader-$artifact_name"
+            elif [ -f "$artifact_dir/dist/iiif-downloader.exe" ]; then
+              # Windows executable
+              cp "$artifact_dir/dist/iiif-downloader.exe" "release-assets/iiif-downloader-$artifact_name.exe"
+            fi
           fi
         done
 
-        # Create a simple README for the release
+        # Create a comprehensive README for the release
         cat > release-assets/README.md << 'EOF'
         # IIIF Downloader Release
 
-        ## Linux x86_64 Executables
+        This release contains executables for multiple platforms.
 
-        - `iiif-downloader-linux-x86_64` - Main executable (Python 3.12)
-        - `iiif-downloader-linux-x86_64-python3.11` - Python 3.11 version
-        - `iiif-downloader-linux-x86_64-python3.12` - Python 3.12 version
-        - `iiif-downloader-linux-x86_64-python3.13` - Python 3.13 version
+        ## Available Executables
+
+        ### Linux (x86_64)
+        - `iiif-downloader-ubuntu-latest-3.12-*` - Linux executable
+
+        ### macOS
+        - `iiif-downloader-macos-latest-3.12-*` - macOS executable (Intel/ARM)
+
+        ### Windows
+        - `iiif-downloader-windows-latest-3.12-*.exe` - Windows executable
 
         ## Usage
 
+        ### Linux/macOS
         ```bash
         # Make executable
-        chmod +x iiif-downloader-linux-x86_64
+        chmod +x iiif-downloader-ubuntu-latest-3.12-*
 
         # Run
-        ./iiif-downloader-linux-x86_64 --help
+        ./iiif-downloader-ubuntu-latest-3.12-* --help
+        ```
+
+        ### Windows
+        ```cmd
+        # Run directly
+        iiif-downloader-windows-latest-3.12-*.exe --help
         ```
 
         ## Features
