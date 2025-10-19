@@ -6,7 +6,7 @@ dependencies = [
 ]
 name = "iiif-downloader"
 requires-python = ">= 3.11"
-version = "0.2.8"
+version = "0.2.9"
 
 [project.scripts]
 iiif-downloader = "iiif_downloader.cli:main"
