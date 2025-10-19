@@ -1,5 +1,8 @@
 # IIIF Downloader
 
+[![CI](https://github.com/conradolandia/iiif-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/conradolandia/iiif-downloader/actions/workflows/ci.yml)
+[![Release](https://github.com/conradolandia/iiif-downloader/actions/workflows/build-release.yml/badge.svg)](https://github.com/conradolandia/iiif-downloader/actions/workflows/build-release.yml)
+
 A Python tool for downloading images from IIIF (International Image Interoperability Framework) manifests with progress tracking, rate limiting, and resume capabilities.
 
 ## Features

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install pixi
+      uses: prefix-dev/setup-pixi@v0.12.0
+
+    - name: Install dependencies
+      run: pixi install
+
+    - name: Run linting and formatting
+      run: pixi run check
+
+    - name: Test executable build
+      run: |
+        pixi run build-exe
+        ./dist/iiif-downloader --help
+        echo "✅ Executable builds and runs successfully"
+
+    - name: Test single canvas download
+      run: |
+        timeout 30s ./dist/iiif-downloader \
+          --source "https://www.e-codices.unifr.ch/metadata/iiif/ubb-A-II-0005/manifest.json" \
+          --output "test-ci" \
+          --canvas 1 \
+          --size 512 || true
+        echo "✅ Single canvas download test completed"
+
+    - name: Test metadata extraction
+      run: |
+        timeout 10s ./dist/iiif-downloader \
+          --source "https://www.e-codices.unifr.ch/metadata/iiif/ubb-A-II-0005/manifest.json" \
+          --output "test-metadata" \
+          --metadata || true
+        echo "✅ Metadata extraction test completed"

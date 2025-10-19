@@ -1,0 +1,192 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install pixi
+      uses: prefix-dev/setup-pixi@v0.12.0
+
+    - name: Install dependencies
+      run: pixi install
+
+    - name: Run tests
+      run: pixi run check
+
+    - name: Build executable
+      run: pixi run build-exe
+
+    - name: Test executable
+      run: |
+        ./dist/iiif-downloader --help
+        echo "Executable test passed"
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: iiif-downloader-${{ matrix.python-version }}-${{ github.sha }}
+        path: dist/
+        retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install pixi
+      uses: prefix-dev/setup-pixi@v0.12.0
+
+    - name: Install dependencies
+      run: pixi install
+
+    - name: Build release executable
+      run: pixi run build-exe
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts/
+
+    - name: Prepare release assets
+      run: |
+        mkdir -p release-assets
+
+        # Copy the main executable (built with Python 3.12)
+        cp dist/iiif-downloader release-assets/iiif-downloader-linux-x86_64
+
+        # Copy executables from other Python versions
+        for artifact in artifacts/*/; do
+          if [ -f "$artifact/dist/iiif-downloader" ]; then
+            python_version=$(basename "$artifact" | cut -d'-' -f2)
+            cp "$artifact/dist/iiif-downloader" "release-assets/iiif-downloader-linux-x86_64-python$python_version"
+          fi
+        done
+
+        # Create a simple README for the release
+        cat > release-assets/README.md << 'EOF'
+        # IIIF Downloader Release
+
+        ## Linux x86_64 Executables
+
+        - `iiif-downloader-linux-x86_64` - Main executable (Python 3.12)
+        - `iiif-downloader-linux-x86_64-python3.11` - Python 3.11 version
+        - `iiif-downloader-linux-x86_64-python3.12` - Python 3.12 version
+        - `iiif-downloader-linux-x86_64-python3.13` - Python 3.13 version
+
+        ## Usage
+
+        ```bash
+        # Make executable
+        chmod +x iiif-downloader-linux-x86_64
+
+        # Run
+        ./iiif-downloader-linux-x86_64 --help
+        ```
+
+        ## Features
+
+        - Download IIIF images from manifests
+        - Progress tracking with rich terminal output
+        - Adaptive rate limiting
+        - Resume interrupted downloads
+        - Single canvas/page download
+        - Metadata extraction
+        - Standalone executable (no Python required)
+
+        ## Examples
+
+        ```bash
+        # Download all images
+        ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images"
+
+        # Download single page
+        ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --canvas 5 --output "page5"
+
+        # Resume interrupted download
+        ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images" --resume
+        ```
+        EOF
+
+    - name: Create checksums
+      run: |
+        cd release-assets
+        sha256sum * > checksums.txt
+
+    - name: Create release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release-assets/*
+        body: |
+          ## 🎉 IIIF Downloader Release
+
+          ### What's New
+          - 🚀 **Startup Progress Feedback** - See what the app is doing during startup
+          - 🎯 **Single Canvas Download** - Download specific pages with `--canvas` option
+          - 📊 **Rich Progress Bars** - Beautiful terminal output with progress tracking
+          - ⚡ **Adaptive Rate Limiting** - Respectful server requests
+          - 🔄 **Resume Functionality** - Continue interrupted downloads
+          - 📄 **Metadata Extraction** - Save manifest information
+
+          ### Features
+          - **Standalone Executable** - No Python installation required
+          - **Cross-Platform** - Works on Linux x86_64
+          - **Multiple Python Versions** - Built with Python 3.11, 3.12, and 3.13
+          - **Rich CLI** - Beautiful terminal interface with progress bars
+          - **Resume Support** - Skip already downloaded files
+          - **Rate Limiting** - Adaptive and configurable request rates
+          - **Single Page Download** - Download specific canvases/pages
+          - **Metadata Export** - Extract and save manifest information
+
+          ### Quick Start
+
+          ```bash
+          # Download all images from a manifest
+          ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images"
+
+          # Download a specific page
+          ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --canvas 5 --output "page5"
+
+          # Resume interrupted download
+          ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images" --resume
+          ```
+
+          ### Installation
+
+          1. Download the appropriate executable for your system
+          2. Make it executable: `chmod +x iiif-downloader-linux-x86_64`
+          3. Run: `./iiif-downloader-linux-x86_64 --help`
+
+          ### Documentation
+
+          See the [README](https://github.com/conradolandia/iiif-downloader) for full documentation and examples.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
