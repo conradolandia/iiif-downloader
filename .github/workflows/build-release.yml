@@ -101,6 +101,26 @@ jobs:
             # Extract platform and Python version from artifact name
             artifact_name=$(basename "$artifact_dir")
             echo "Processing artifact: $artifact_name"
+
+            # Parse the artifact name to extract OS and create clean executable name
+            if [[ "$artifact_name" == *"ubuntu-latest"* ]]; then
+              platform="linux"
+            elif [[ "$artifact_name" == *"macos-latest"* ]]; then
+              platform="macos"
+            elif [[ "$artifact_name" == *"windows-latest"* ]]; then
+              platform="windows"
+            else
+              platform="unknown"
+            fi
+
+            # Create clean executable name
+            if [ "$platform" = "windows" ]; then
+              clean_name="iiif-downloader-${platform}.exe"
+            else
+              clean_name="iiif-downloader-${platform}"
+            fi
+
+            echo "Creating executable: $clean_name"
             echo "Artifact directory contents:"
             ls -la "$artifact_dir" 2>/dev/null || echo "Cannot list directory"
 
@@ -108,21 +128,21 @@ jobs:
             if [ -f "$artifact_dir/iiif-downloader" ]; then
               # Unix executable (Linux/macOS) - directly in artifact root
               echo "Found Unix executable: $artifact_dir/iiif-downloader"
-              cp "$artifact_dir/iiif-downloader" "release-assets/iiif-downloader-$artifact_name"
-              chmod +x "release-assets/iiif-downloader-$artifact_name"
+              cp "$artifact_dir/iiif-downloader" "release-assets/$clean_name"
+              chmod +x "release-assets/$clean_name"
             elif [ -f "$artifact_dir/iiif-downloader.exe" ]; then
               # Windows executable - directly in artifact root
               echo "Found Windows executable: $artifact_dir/iiif-downloader.exe"
-              cp "$artifact_dir/iiif-downloader.exe" "release-assets/iiif-downloader-$artifact_name.exe"
+              cp "$artifact_dir/iiif-downloader.exe" "release-assets/$clean_name"
             elif [ -f "$artifact_dir/dist/iiif-downloader" ]; then
               # Unix executable (Linux/macOS) - in dist subdirectory
               echo "Found Unix executable in dist: $artifact_dir/dist/iiif-downloader"
-              cp "$artifact_dir/dist/iiif-downloader" "release-assets/iiif-downloader-$artifact_name"
-              chmod +x "release-assets/iiif-downloader-$artifact_name"
+              cp "$artifact_dir/dist/iiif-downloader" "release-assets/$clean_name"
+              chmod +x "release-assets/$clean_name"
             elif [ -f "$artifact_dir/dist/iiif-downloader.exe" ]; then
               # Windows executable - in dist subdirectory
               echo "Found Windows executable in dist: $artifact_dir/dist/iiif-downloader.exe"
-              cp "$artifact_dir/dist/iiif-downloader.exe" "release-assets/iiif-downloader-$artifact_name.exe"
+              cp "$artifact_dir/dist/iiif-downloader.exe" "release-assets/$clean_name"
             else
               echo "No executable found in $artifact_dir"
             fi
@@ -141,30 +161,27 @@ jobs:
 
         ## Available Executables
 
-        ### Linux (x86_64)
-        - `iiif-downloader-ubuntu-latest-3.12-*` - Linux executable
-
-        ### macOS
-        - `iiif-downloader-macos-latest-3.12-*` - macOS executable (Intel/ARM)
-
-        ### Windows
-        - `iiif-downloader-windows-latest-3.12-*.exe` - Windows executable
+        - `iiif-downloader-linux` - Linux executable (x86_64)
+        - `iiif-downloader-macos` - macOS executable (Intel/ARM)
+        - `iiif-downloader-windows.exe` - Windows executable
 
         ## Usage
 
         ### Linux/macOS
         ```bash
         # Make executable
-        chmod +x iiif-downloader-ubuntu-latest-3.12-*
+        chmod +x iiif-downloader-linux
+        chmod +x iiif-downloader-macos
 
         # Run
-        ./iiif-downloader-ubuntu-latest-3.12-* --help
+        ./iiif-downloader-linux --help
+        ./iiif-downloader-macos --help
         ```
 
         ### Windows
         ```cmd
         # Run directly
-        iiif-downloader-windows-latest-3.12-*.exe --help
+        iiif-downloader-windows.exe --help
         ```
 
         ## Features
