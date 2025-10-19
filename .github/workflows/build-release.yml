@@ -41,7 +41,7 @@ jobs:
         echo "Executable test passed"
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: iiif-downloader-${{ matrix.python-version }}-${{ github.sha }}
         path: dist/
@@ -71,7 +71,7 @@ jobs:
       run: pixi run build-exe
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v3
+      uses: actions/download-artifact@v4
       with:
         path: artifacts/
 
