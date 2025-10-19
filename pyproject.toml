@@ -58,7 +58,7 @@ ruff = ">=0.1.0"
 pre-commit = ">=3.0.0"
 
 [tool.pixi.tasks]
-install = "pip install -e ."
+install-package = "pip install -e ."
 run = "python -m iiif_downloader"
 build-exe = "pyinstaller iiif-downloader.spec --clean"
 lint = "ruff check src/"
@@ -66,3 +66,4 @@ format = "ruff format src/"
 format-check = "ruff format --check src/"
 check = "ruff check src/ && ruff format --check src/"
 pre-commit = "pre-commit run --all-files"
+install = "cp dist/iiif-downloader ~/.local/bin/iiif-downloader"

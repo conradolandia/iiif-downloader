@@ -145,7 +145,7 @@ packages:
 - pypi: ./
   name: iiif-downloader
   version: 0.1.0
-  sha256: 31c90c6b05112194a482f63216676c020429e70cedab523c604a4536415b2762
+  sha256: 58b23c2ee11e15b3af206603248c10c2be06e1bea921ded4b2bcfdf31f77b0ba
   requires_dist:
   - requests>=2.31.0
   - rich>=13.0.0
