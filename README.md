@@ -5,6 +5,7 @@ A Python tool for downloading images from IIIF (International Image Interoperabi
 ## Features
 
 - Download images from IIIF manifests (URL or local file)
+- **Interactive TUI mode** with real-time statistics and controls
 - Progress tracking with rich terminal output
 - Adaptive rate limiting to be respectful to servers
 - Resume interrupted downloads
@@ -49,6 +50,60 @@ iiif-downloader --source "https://example.com/manifest.json" --output "my_images
 
 # Download with specific image size
 iiif-downloader --source "https://example.com/manifest.json" --size 1024
+```
+
+### TUI Mode (Interactive Interface)
+
+The IIIF downloader includes a modern TUI (Text User Interface) for an enhanced interactive experience:
+
+```bash
+# Use TUI mode (auto-detected in proper terminals)
+iiif-downloader --source "https://example.com/manifest.json" --tui
+
+# Force CLI mode (disable TUI)
+iiif-downloader --source "https://example.com/manifest.json" --no-tui
+```
+
+#### TUI Features
+
+- **Real-time Statistics**: Live updates of download progress, speed, and ETA
+- **Interactive Controls**: Pause/resume downloads with keyboard shortcuts
+- **Activity Log**: Scrollable log of recent download activities
+- **Progress Visualization**: Both overall and per-image progress bars
+- **Keyboard Shortcuts**:
+  - `Q` - Quit the application
+  - `P` - Pause/Resume downloads
+  - `S` - Save activity log (planned feature)
+
+#### TUI Layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ IIIF Downloader v0.1.0                    [Q]uit [P]ause    │
+├─────────────────────────────────────────────────────────────┤
+│ Manifest: manuscript_images                                 │
+│ Output: ./manuscript_images/                                │
+│ Status: Downloading... [████████░░] 45/100 (45%)            │
+├─────────────────────────────────────────────────────────────┤
+│ Statistics                                                  │
+│ ├─ Downloaded: 45 images (234.5 MB)                         │
+│ ├─ Skipped: 12 images (already exist)                       │
+│ ├─ Failed: 2 images                                         │
+│ ├─ Remaining: 55 images                                     │
+│ ├─ Rate: 15.3 req/min (adaptive)                            │
+│ └─ Elapsed: 00:03:24 | ETA: 00:04:12                        │
+├─────────────────────────────────────────────────────────────┤
+│ Current Download                                            │
+│ ├─ Image: 046/100 (image_046.jpg)                           │
+│ ├─ Size: 5.2 MB / 5.2 MB [████████████] 100%                │
+│ └─ Speed: 1.8 MB/s                                          │
+├─────────────────────────────────────────────────────────────┤
+│ Recent Activity                                             │
+│ ├─ ✓ Downloaded image_045.jpg (4.8 MB)                     │
+│ ├─ ✓ Downloaded image_044.jpg (5.1 MB)                     │
+│ ├─ ⊘ Skipped image_043.jpg (exists)                        │
+│ └─ ✗ Failed image_042.jpg (timeout)                        │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Advanced Options
@@ -111,10 +166,17 @@ iiif-downloader/
 │   ├── __main__.py          # CLI entry point
 │   ├── cli.py                # Argument parsing
 │   ├── downloader.py         # Core download logic
+│   ├── download_engine.py    # Event-driven download engine
 │   ├── manifest.py           # Manifest loading/parsing
 │   ├── metadata.py           # Metadata extraction
 │   ├── rate_limiter.py       # Rate limiting logic
-│   └── file_tracker.py       # File existence tracking
+│   ├── file_tracker.py       # File existence tracking
+│   └── tui/                  # TUI package
+│       ├── __init__.py
+│       ├── app.py            # Main TUI application
+│       ├── widgets.py        # Custom widgets
+│       ├── downloader_tui.py # TUI-specific downloader
+│       └── themes.py            # Color themes
 ├── pyproject.toml            # Package configuration
 ├── pixi.toml                 # Pixi configuration
 └── iiif-downloader.spec     # PyInstaller spec

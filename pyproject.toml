@@ -3,6 +3,7 @@ authors = [{name = "conradolandia", email = "andresconrado@gmail.com"}]
 dependencies = [
     "requests>=2.31.0",
     "rich>=13.0.0",
+    "textual>=0.47.0",
 ]
 name = "iiif-downloader"
 requires-python = ">= 3.11"
