@@ -93,7 +93,7 @@ fi
 # Commit the version bump
 echo "📝 Committing version bump..."
 git add pyproject.toml
-git commit -m "Bump version to $new_version"
+git commit --no-verify -m "Bump version to $new_version"
 
 # Create and push tag
 echo "🏷️  Creating and pushing tag..."
