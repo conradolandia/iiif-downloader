@@ -163,7 +163,7 @@ pixi run build-exe
 iiif-downloader/
 ├── src/iiif_downloader/
 │   ├── __init__.py
-│   ├── __main__.py          # CLI entry point
+│   ├── __main__.py           # CLI entry point
 │   ├── cli.py                # Argument parsing
 │   ├── downloader.py         # Core download logic
 │   ├── download_engine.py    # Event-driven download engine
@@ -176,10 +176,10 @@ iiif-downloader/
 │       ├── app.py            # Main TUI application
 │       ├── widgets.py        # Custom widgets
 │       ├── downloader_tui.py # TUI-specific downloader
-│       └── themes.py            # Color themes
+│       └── themes.py         # Color themes
 ├── pyproject.toml            # Package configuration
 ├── pixi.toml                 # Pixi configuration
-└── iiif-downloader.spec     # PyInstaller spec
+└── iiif-downloader.spec      # PyInstaller spec
 ```
 
 ### Running Tests
