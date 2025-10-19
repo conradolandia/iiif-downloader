@@ -25,10 +25,6 @@ jobs:
     - name: Install pixi
       uses: prefix-dev/setup-pixi@v0.9.1
 
-    - name: Install dependencies
-      shell: bash
-      run: pixi install --locked
-
     - name: Run tests
       shell: bash
       run: pixi run check
@@ -73,9 +69,6 @@ jobs:
 
     - name: Install pixi
       uses: prefix-dev/setup-pixi@v0.9.1
-
-    - name: Install dependencies
-      run: pixi install --locked
 
     - name: Download all artifacts
       uses: actions/download-artifact@v4
