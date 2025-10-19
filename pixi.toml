@@ -1,0 +1,19 @@
+[project]
+name = "iiif-downloader"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = "3.12.*"
+requests = ">=2.31.0"
+rich = ">=13.0.0"
+pyinstaller = ">=6.0.0"
+ruff = ">=0.1.0"
+
+[tasks]
+check = "ruff check src/ && ruff format --check src/"
+format = "ruff format src/"
+lint = "ruff check src/ --fix"
+run = "python -m iiif_downloader"
+build-exe = "pyinstaller iiif-downloader.spec --clean"
+install = "pip install -e ."
