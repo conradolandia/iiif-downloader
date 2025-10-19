@@ -3,6 +3,29 @@
 
 set -e
 
+# Check for help or non-interactive mode
+if [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
+    echo "Usage: $0 [--non-interactive|-n VERSION]"
+    echo ""
+    echo "Create a new release by bumping the version in pyproject.toml"
+    echo "and creating a git tag."
+    echo ""
+    echo "Options:"
+    echo "  --non-interactive, -n VERSION  Use provided version without prompting"
+    echo "  --help, -h                   Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0                           # Interactive mode"
+    echo "  $0 --non-interactive 1.2.3   # Non-interactive mode"
+    exit 0
+fi
+
+NON_INTERACTIVE=false
+if [ "$1" = "--non-interactive" ] || [ "$1" = "-n" ]; then
+    NON_INTERACTIVE=true
+    NEW_VERSION="$2"
+fi
+
 # Check if we're in a git repository
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
     echo "❌ Not in a git repository"
@@ -28,12 +51,24 @@ fi
 current_version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
 echo "📦 Current version: $current_version"
 
-# Ask for new version
-echo "Enter new version (current: $current_version):"
-read -r new_version
+# Get new version
+if [ "$NON_INTERACTIVE" = true ]; then
+    new_version="$NEW_VERSION"
+    echo "📦 Using provided version: $new_version"
+else
+    # Ask for new version
+    echo "Enter new version (current: $current_version):"
+    read -r new_version
+fi
 
 if [ -z "$new_version" ]; then
     echo "❌ Version cannot be empty"
+    exit 1
+fi
+
+# Check if version is the same as current
+if [ "$new_version" = "$current_version" ]; then
+    echo "❌ New version cannot be the same as current version"
     exit 1
 fi
 
@@ -46,13 +81,22 @@ fi
 echo "🚀 Creating release v$new_version..."
 
 # Update version in pyproject.toml
+echo "📝 Updating version in pyproject.toml..."
 sed -i "s/version = \"$current_version\"/version = \"$new_version\"/" pyproject.toml
 
+# Verify the change was made
+if ! grep -q "version = \"$new_version\"" pyproject.toml; then
+    echo "❌ Failed to update version in pyproject.toml"
+    exit 1
+fi
+
 # Commit the version bump
+echo "📝 Committing version bump..."
 git add pyproject.toml
 git commit -m "Bump version to $new_version"
 
 # Create and push tag
+echo "🏷️  Creating and pushing tag..."
 git tag "v$new_version"
 git push origin main
 git push origin "v$new_version"
