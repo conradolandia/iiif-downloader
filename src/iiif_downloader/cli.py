@@ -1,8 +1,9 @@
 """Command-line interface for the IIIF downloader."""
 
 import argparse
+import sys
 
-from iiif_downloader.downloader import download_iiif_images
+from iiif_downloader.downloader import download_iiif_images, download_single_canvas
 from iiif_downloader.manifest import load_manifest
 from iiif_downloader.metadata import save_metadata
 
@@ -35,6 +36,11 @@ def main():
         action="store_true",
         help="Disable adaptive rate limiting (use fixed base delay)",
     )
+    parser.add_argument(
+        "--canvas",
+        type=int,
+        help="Download only a specific canvas/page (1-based index)",
+    )
 
     args = parser.parse_args()
 
@@ -46,13 +52,29 @@ def main():
     else:
         rate_limit = None  # Use adaptive mode
 
+    # Add progress feedback for startup
+    print("🔄 Loading manifest...", end="", flush=True)
+    sys.stdout.flush()
+
     manifest_data = load_manifest(args.source)
     if manifest_data:
+        print(" ✅")
+
         # Save metadata if requested
         if args.metadata:
             save_metadata(manifest_data, args.output)
 
         # Download images
-        download_iiif_images(
-            manifest_data, args.size, args.output, args.resume, rate_limit
-        )
+        if args.canvas:
+            print(f"📥 Downloading canvas {args.canvas}...")
+            download_single_canvas(
+                manifest_data, args.canvas, args.size, args.output, rate_limit
+            )
+        else:
+            print("📥 Starting download...")
+            download_iiif_images(
+                manifest_data, args.size, args.output, args.resume, rate_limit
+            )
+    else:
+        print(" ❌")
+        sys.exit(1)

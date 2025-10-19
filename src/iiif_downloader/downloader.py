@@ -225,3 +225,150 @@ def download_iiif_images(
         )
         console.print(f"Skipped: {skipped_count}")
         console.print(f"Failed: {failed_count}")
+
+
+def download_single_canvas(
+    manifest_data, canvas_index, size=None, output_folder=None, rate_limit=None
+):
+    """Download a single canvas/page from a IIIF manifest.
+
+    Args:
+        manifest_data: Manifest data dict with 'content' and 'filename' keys
+        canvas_index: 1-based index of the canvas to download
+        size: Desired image width (optional)
+        output_folder: Output directory for images (optional)
+        rate_limit: Fixed rate limit in requests per minute (None for adaptive)
+    """
+    console = Console()
+
+    # Headers to mimic a browser
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "DNT": "1",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+
+    # Determine output directory
+    if output_folder:
+        base_filename = output_folder
+    else:
+        # Extract the base filename
+        if "filename" in manifest_data:
+            base_filename = os.path.splitext(manifest_data["filename"])[0]
+        else:
+            base_filename = "iiif_images"
+
+    # Create a directory to store the downloaded images
+    os.makedirs(base_filename, exist_ok=True)
+
+    manifest = manifest_data["content"]
+    canvases = manifest["sequences"][0]["canvases"]
+    total_images = len(canvases)
+
+    # Validate canvas index
+    if canvas_index < 1 or canvas_index > total_images:
+        console.print(
+            f"[bold red]Error: Canvas index {canvas_index} is out of range (1-{total_images})[/bold red]"
+        )
+        return
+
+    # Initialize rate limiter
+    rate_limiter = RateLimiter(fixed_rate=rate_limit)
+
+    # Get the specific canvas (convert to 0-based index)
+    canvas = canvases[canvas_index - 1]
+
+    console.print(
+        f"[bold blue]Downloading canvas {canvas_index} of {total_images}[/bold blue]"
+    )
+
+    try:
+        # Rate limiting
+        rate_limiter.wait_if_needed()
+
+        # Fetch image info
+        image_info_url = (
+            canvas["images"][0]["resource"]["service"]["@id"] + "/info.json"
+        )
+
+        console.print("[dim]Fetching image info...[/dim]")
+        response = requests.get(image_info_url, headers=headers)
+        response.raise_for_status()
+
+        # Parse image info
+        info = json.loads(response.text)
+
+        # Determine image size
+        if size:
+            image_size = size
+        else:
+            image_size = max(info["sizes"], key=lambda x: x["width"])["width"]
+
+        # Construct image URL
+        image_url = f"{info['@id']}/full/{image_size},/0/default.jpg"
+        filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
+
+        console.print("[dim]Downloading image...[/dim]")
+
+        # Download with progress tracking
+        with Progress(
+            TextColumn("[bold blue]Downloading canvas"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console,
+            expand=True,
+        ) as progress:
+            task = progress.add_task("Downloading", total=100)
+
+            response = requests.get(image_url, headers=headers, stream=True)
+            response.raise_for_status()
+
+            content_length = response.headers.get("content-length")
+            total_bytes = int(content_length) if content_length else 0
+            downloaded_bytes = 0
+
+            with open(filename, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_bytes += len(chunk)
+
+                        # Update progress
+                        if total_bytes > 0:
+                            progress.update(
+                                task, completed=(downloaded_bytes / total_bytes) * 100
+                            )
+                        else:
+                            # If we don't know total size, just show activity
+                            progress.update(
+                                task,
+                                completed=min(95, downloaded_bytes / 1024 / 1024 * 10),
+                            )
+
+            progress.update(task, completed=100)
+
+        console.print(
+            f"[bold green]✅ Canvas {canvas_index} downloaded successfully![/bold green]"
+        )
+        console.print(f"[dim]Saved as: {filename}[/dim]")
+
+        # Show file size
+        if os.path.exists(filename):
+            file_size = os.path.getsize(filename)
+            if file_size > 1024 * 1024:
+                size_str = f"{file_size / 1024 / 1024:.1f} MB"
+            else:
+                size_str = f"{file_size / 1024:.1f} KB"
+            console.print(f"[dim]File size: {size_str}[/dim]")
+
+    except requests.RequestException as e:
+        console.print(
+            f"[bold red]Error downloading canvas {canvas_index}:[/bold red] {e}"
+        )
+    except KeyError as e:
+        console.print(f"[bold red]Error accessing manifest data:[/bold red] {e}")
+    except Exception as e:
+        console.print(f"[bold red]Unexpected error:[/bold red] {e}")
