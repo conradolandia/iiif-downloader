@@ -188,5 +188,5 @@ jobs:
           ### Documentation
 
           See the [README](https://github.com/conradolandia/iiif-downloader) for full documentation and examples.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
