@@ -14,6 +14,11 @@ from rich.progress import (
 )
 
 from iiif_downloader.file_tracker import FileTracker
+from iiif_downloader.manifest import (
+    detect_manifest_version,
+    get_canvases_from_manifest,
+    get_image_service_from_canvas,
+)
 from iiif_downloader.rate_limiter import RateLimiter
 
 
@@ -55,8 +60,16 @@ def download_iiif_images(
     os.makedirs(base_filename, exist_ok=True)
 
     manifest = manifest_data["content"]
-    canvases = manifest["sequences"][0]["canvases"]
+    version = detect_manifest_version(manifest)
+    canvases = get_canvases_from_manifest(manifest)
     total_images = len(canvases)
+
+    # Display detected version
+    console.print(f"[bold blue]Detected IIIF version:[/bold blue] {version}")
+
+    if not canvases:
+        console.print("[bold red]Error: No canvases found in manifest[/bold red]")
+        return
 
     # Initialize file tracker and rate limiter
     file_tracker = FileTracker(base_filename, total_images)
@@ -113,9 +126,16 @@ def download_iiif_images(
                 rate_limiter.wait_if_needed()
 
                 # Fetch image info
-                image_info_url = (
-                    canvas["images"][0]["resource"]["service"]["@id"] + "/info.json"
-                )
+                image_service_url = get_image_service_from_canvas(canvas, version)
+                if not image_service_url:
+                    console.print(
+                        f"[bold red]Error: Could not find image service URL for canvas {idx + 1}[/bold red]"
+                    )
+                    failed_count += 1
+                    progress.update(main_task, advance=1)
+                    continue
+
+                image_info_url = image_service_url + "/info.json"
 
                 response = requests.get(image_info_url, headers=headers)
                 response.raise_for_status()
@@ -265,8 +285,16 @@ def download_single_canvas(
     os.makedirs(base_filename, exist_ok=True)
 
     manifest = manifest_data["content"]
-    canvases = manifest["sequences"][0]["canvases"]
+    version = detect_manifest_version(manifest)
+    canvases = get_canvases_from_manifest(manifest)
     total_images = len(canvases)
+
+    # Display detected version
+    console.print(f"[bold blue]Detected IIIF version:[/bold blue] {version}")
+
+    if not canvases:
+        console.print("[bold red]Error: No canvases found in manifest[/bold red]")
+        return
 
     # Validate canvas index
     if canvas_index < 1 or canvas_index > total_images:
@@ -290,9 +318,14 @@ def download_single_canvas(
         rate_limiter.wait_if_needed()
 
         # Fetch image info
-        image_info_url = (
-            canvas["images"][0]["resource"]["service"]["@id"] + "/info.json"
-        )
+        image_service_url = get_image_service_from_canvas(canvas, version)
+        if not image_service_url:
+            console.print(
+                f"[bold red]Error: Could not find image service URL for canvas {canvas_index}[/bold red]"
+            )
+            return
+
+        image_info_url = image_service_url + "/info.json"
 
         console.print("[dim]Fetching image info...[/dim]")
         response = requests.get(image_info_url, headers=headers)

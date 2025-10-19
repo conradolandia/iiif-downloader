@@ -8,6 +8,8 @@ A Python tool for downloading images from IIIF (International Image Interoperabi
 ## Features
 
 - Download images from IIIF manifests (URL or local file)
+- Support for both IIIF Presentation API v2.1 and v3.0
+- Automatic version detection
 - Progress tracking with rich terminal output
 - Adaptive rate limiting to be respectful to servers
 - Resume interrupted downloads
@@ -82,6 +84,15 @@ The downloader includes intelligent rate limiting to be respectful to servers:
 
 - **Fixed rate mode**: Use `--rate-limit` to set a fixed requests-per-minute limit
 - **Base delay mode**: Use `--no-adaptive-rate` to disable adaptive behavior
+
+### IIIF Version Support
+
+The downloader supports both IIIF Presentation API versions:
+
+- **IIIF v2.1**: Traditional manifests with `sequences[0].canvases` structure
+- **IIIF v3.0**: Modern manifests with `items` structure
+- **Automatic detection**: The tool automatically detects the manifest version
+- **Backward compatibility**: All existing v2.1 manifests continue to work
 
 ### Resume Functionality
 
