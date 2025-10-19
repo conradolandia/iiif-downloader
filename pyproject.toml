@@ -1,13 +1,51 @@
 [project]
 authors = [{name = "conradolandia", email = "andresconrado@gmail.com"}]
-dependencies = []
+dependencies = [
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+]
 name = "iiif-downloader"
 requires-python = ">= 3.11"
 version = "0.1.0"
 
+[project.scripts]
+iiif-downloader = "iiif_downloader.cli:main"
+
 [build-system]
 build-backend = "hatchling.build"
 requires = ["hatchling"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iiif_downloader"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
+    "UP", # pyupgrade
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["iiif_downloader"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
 
 [tool.pixi.workspace]
 channels = ["conda-forge"]
@@ -15,5 +53,16 @@ platforms = ["linux-64"]
 
 [tool.pixi.pypi-dependencies]
 iiif_downloader = { path = ".", editable = true }
+pyinstaller = ">=6.0.0"
+ruff = ">=0.1.0"
+pre-commit = ">=3.0.0"
 
 [tool.pixi.tasks]
+install = "pip install -e ."
+run = "python -m iiif_downloader"
+build-exe = "pyinstaller iiif-downloader.spec --clean"
+lint = "ruff check src/"
+format = "ruff format src/"
+format-check = "ruff format --check src/"
+check = "ruff check src/ && ruff format --check src/"
+pre-commit = "pre-commit run --all-files"
