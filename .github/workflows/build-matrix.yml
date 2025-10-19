@@ -35,15 +35,19 @@ jobs:
       uses: prefix-dev/setup-pixi@v0.9.1
 
     - name: Install dependencies
+      shell: bash
       run: pixi install
 
     - name: Run tests
+      shell: bash
       run: pixi run check
 
     - name: Build executable
+      shell: bash
       run: pixi run build-exe
 
     - name: Test executable
+      shell: bash
       run: |
         if [ "${{ matrix.os }}" = "windows-latest" ]; then
           ./dist/iiif-downloader.exe --help
