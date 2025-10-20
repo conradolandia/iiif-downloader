@@ -18,6 +18,7 @@ from iiif_downloader.manifest import (
     detect_manifest_version,
     get_canvases_from_manifest,
     get_image_service_from_canvas,
+    get_image_size_from_info,
 )
 from iiif_downloader.rate_limiter import RateLimiter
 
@@ -166,12 +167,15 @@ def download_iiif_images(
                     progress.update(main_task, advance=1)
                     continue
 
-                # Determine the size to use
-                if size:
-                    image_size = size
-                else:
-                    # Use the largest available size
-                    image_size = max(info["sizes"], key=lambda x: x["width"])["width"]
+                # Determine the size to use using modular function
+                image_size = get_image_size_from_info(info, size)
+                if image_size is None:
+                    console.print(
+                        f"[bold red]Error: No size information available for image {idx + 1}[/bold red]"
+                    )
+                    failed_count += 1
+                    progress.update(main_task, advance=1)
+                    continue
 
                 # Construct the image URL
                 image_url = f"{info['@id']}/full/{image_size},/0/default.jpg"
@@ -339,11 +343,13 @@ def download_single_canvas(
         # Parse image info
         info = json.loads(response.text)
 
-        # Determine image size
-        if size:
-            image_size = size
-        else:
-            image_size = max(info["sizes"], key=lambda x: x["width"])["width"]
+        # Determine image size using modular function
+        image_size = get_image_size_from_info(info, size)
+        if image_size is None:
+            console.print(
+                f"[bold red]Error: No size information available for canvas {canvas_index}[/bold red]"
+            )
+            return
 
         # Construct image URL
         image_url = f"{info['@id']}/full/{image_size},/0/default.jpg"

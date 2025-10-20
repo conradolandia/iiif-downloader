@@ -109,6 +109,68 @@ def get_image_service_from_canvas(canvas, version):
     return None
 
 
+def detect_image_api_version(image_info):
+    """Detect the IIIF Image API version from image info response.
+
+    Args:
+        image_info: The parsed image info JSON response
+
+    Returns:
+        str: The detected version ('1.1', '2.0', '2.1', '3.0') or 'unknown'
+    """
+    # Check for explicit version in profile
+    if "profile" in image_info:
+        profile = image_info["profile"]
+        if isinstance(profile, str):
+            if "image-api/3" in profile:
+                return "3.0"
+            elif "image-api/2" in profile:
+                return "2.1"
+            elif "image-api/1" in profile:
+                return "1.1"
+        elif isinstance(profile, list):
+            for prof in profile:
+                if isinstance(prof, str):
+                    if "image-api/3" in prof:
+                        return "3.0"
+                    elif "image-api/2" in prof:
+                        return "2.1"
+                    elif "image-api/1" in prof:
+                        return "1.1"
+
+    # Check for structural differences
+    if "sizes" in image_info:
+        return "2.1"  # IIIF Image API 2.x has sizes array
+    elif "width" in image_info and "height" in image_info:
+        return "1.1"  # IIIF Image API 1.x has basic width/height
+
+    return "unknown"
+
+
+def get_image_size_from_info(image_info, requested_size=None):
+    """Extract the appropriate image size from image info, handling different API versions.
+
+    Args:
+        image_info: The parsed image info JSON response
+        requested_size: Specific size requested by user (optional)
+
+    Returns:
+        int: The width to use for the image, or None if no size information available
+    """
+    if requested_size:
+        return requested_size
+
+    # Handle different IIIF Image API versions
+    if "sizes" in image_info:
+        # IIIF Image API 2.x - use the largest available size
+        return max(image_info["sizes"], key=lambda x: x["width"])["width"]
+    elif "width" in image_info:
+        # IIIF Image API 1.x or fallback - use full width
+        return image_info["width"]
+
+    return None
+
+
 def load_manifest(source):
     """Load a IIIF manifest from URL or local file.
 
