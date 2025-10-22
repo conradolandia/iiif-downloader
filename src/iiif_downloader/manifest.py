@@ -161,8 +161,23 @@ def get_image_size_from_info(image_info, requested_size=None):
         return requested_size
 
     # Handle different IIIF Image API versions
-    if "sizes" in image_info:
-        # IIIF Image API 2.x - use the largest available size
+    if "sizes" in image_info and "width" in image_info:
+        # IIIF Image API 2.x - try to use a reasonable large size
+        # First, get the largest size from the sizes array
+        largest_listed = max(image_info["sizes"], key=lambda x: x["width"])["width"]
+        full_width = image_info["width"]
+
+        # Try to use a size between the largest listed and full resolution
+        # This gives us better quality while respecting server capabilities
+        if full_width > largest_listed:
+            # Use a reasonable intermediate size (e.g., 2500px or 50% of full width)
+            target_size = min(2500, full_width // 2)
+            # But don't go smaller than the largest listed size
+            return max(target_size, largest_listed)
+        else:
+            return largest_listed
+    elif "sizes" in image_info:
+        # IIIF Image API 2.x - use the largest available size from sizes array
         return max(image_info["sizes"], key=lambda x: x["width"])["width"]
     elif "width" in image_info:
         # IIIF Image API 1.x or fallback - use full width
