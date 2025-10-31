@@ -18,6 +18,7 @@ from iiif_downloader.manifest import (
     detect_manifest_version,
     get_canvases_from_manifest,
     get_image_service_from_canvas,
+    get_image_service_id_from_info,
     get_image_size_from_info,
 )
 from iiif_downloader.rate_limiter import RateLimiter
@@ -178,7 +179,15 @@ def download_iiif_images(
                     continue
 
                 # Construct the image URL
-                image_url = f"{info['@id']}/full/{image_size},/0/default.jpg"
+                service_id = get_image_service_id_from_info(info)
+                if not service_id:
+                    console.print(
+                        f"[bold red]Error: No service ID found in image info for image {idx + 1}[/bold red]"
+                    )
+                    failed_count += 1
+                    progress.update(main_task, advance=1)
+                    continue
+                image_url = f"{service_id}/full/{image_size},/0/default.jpg"
                 filename = os.path.join(base_filename, f"image_{idx + 1:03d}.jpg")
 
                 # Download the image with streaming progress
@@ -352,7 +361,13 @@ def download_single_canvas(
             return
 
         # Construct image URL
-        image_url = f"{info['@id']}/full/{image_size},/0/default.jpg"
+        service_id = get_image_service_id_from_info(info)
+        if not service_id:
+            console.print(
+                f"[bold red]Error: No service ID found in image info for canvas {canvas_index}[/bold red]"
+            )
+            return
+        image_url = f"{service_id}/full/{image_size},/0/default.jpg"
         filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
 
         console.print("[dim]Downloading image...[/dim]")

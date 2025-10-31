@@ -82,7 +82,7 @@ def get_image_service_from_canvas(canvas, version):
         str: The image service URL, or None if not found
     """
     if version == "3.0":
-        # IIIF v3.0: images are in items[0].items[0].body.service.@id
+        # IIIF v3.0: images are in items[0].items[0].body.service
         items = canvas.get("items", [])
         if items:
             first_item = items[0]
@@ -91,9 +91,18 @@ def get_image_service_from_canvas(canvas, version):
                 if "body" in annotation and "service" in annotation["body"]:
                     service = annotation["body"]["service"]
                     if isinstance(service, list) and service:
-                        return service[0].get("@id")
+                        # Prefer ImageService3 (with "id") over ImageService2 (with "@id")
+                        for svc in service:
+                            # Check for ImageService3 first (uses "id")
+                            if svc.get("id"):
+                                return svc.get("id")
+                        # Fallback to ImageService2 (uses "@id")
+                        for svc in service:
+                            if svc.get("@id"):
+                                return svc.get("@id")
                     elif isinstance(service, dict):
-                        return service.get("@id")
+                        # Check both "id" (v3) and "@id" (v2)
+                        return service.get("id") or service.get("@id")
     elif version == "2.1":
         # IIIF v2.1: images are in images[0].resource.service.@id
         images = canvas.get("images", [])
@@ -145,6 +154,19 @@ def detect_image_api_version(image_info):
         return "1.1"  # IIIF Image API 1.x has basic width/height
 
     return "unknown"
+
+
+def get_image_service_id_from_info(image_info):
+    """Extract the image service ID from image info, handling both v2 and v3 formats.
+
+    Args:
+        image_info: The parsed image info JSON response
+
+    Returns:
+        str: The image service ID, or None if not found
+    """
+    # IIIF Image API v3 uses "id", v2 uses "@id"
+    return image_info.get("id") or image_info.get("@id")
 
 
 def get_image_size_from_info(image_info, requested_size=None):
