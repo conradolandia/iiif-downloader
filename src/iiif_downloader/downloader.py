@@ -187,8 +187,9 @@ def download_iiif_images(
                     failed_count += 1
                     progress.update(main_task, advance=1)
                     continue
-                image_url = f"{service_id}/full/{image_size},/0/default.jpg"
-                filename = os.path.join(base_filename, f"image_{idx + 1:03d}.jpg")
+                # Try .jpeg first (spec recommendation), fall back to .jpg if needed
+                image_url = f"{service_id}/full/{image_size},/0/default.jpeg"
+                filename = os.path.join(base_filename, f"image_{idx + 1:03d}.jpeg")
 
                 # Download the image with streaming progress
                 with progress:
@@ -198,6 +199,13 @@ def download_iiif_images(
                     )
 
                     response = requests.get(image_url, headers=headers, stream=True)
+                    # If .jpeg format is not supported, try .jpg
+                    if response.status_code in (415, 404):
+                        image_url = f"{service_id}/full/{image_size},/0/default.jpg"
+                        filename = os.path.join(
+                            base_filename, f"image_{idx + 1:03d}.jpg"
+                        )
+                        response = requests.get(image_url, headers=headers, stream=True)
                     response.raise_for_status()
 
                     # Get content length if available
@@ -367,8 +375,9 @@ def download_single_canvas(
                 f"[bold red]Error: No service ID found in image info for canvas {canvas_index}[/bold red]"
             )
             return
-        image_url = f"{service_id}/full/{image_size},/0/default.jpg"
-        filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
+        # Try .jpeg first (spec recommendation), fall back to .jpg if needed
+        image_url = f"{service_id}/full/{image_size},/0/default.jpeg"
+        filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpeg")
 
         console.print("[dim]Downloading image...[/dim]")
 
@@ -383,6 +392,11 @@ def download_single_canvas(
             task = progress.add_task("Downloading", total=100)
 
             response = requests.get(image_url, headers=headers, stream=True)
+            # If .jpeg format is not supported, try .jpg
+            if response.status_code in (415, 404):
+                image_url = f"{service_id}/full/{image_size},/0/default.jpg"
+                filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
+                response = requests.get(image_url, headers=headers, stream=True)
             response.raise_for_status()
 
             content_length = response.headers.get("content-length")

@@ -33,9 +33,11 @@ class FileTracker:
                 self.downloaded_indices = set()
 
         # Scan directory for existing files and update state
+        # Check for both .jpeg (preferred) and .jpg (backward compatibility)
         for idx in range(self.total_images):
-            filename = os.path.join(self.output_dir, f"image_{idx + 1:03d}.jpg")
-            if os.path.exists(filename):
+            filename_jpeg = os.path.join(self.output_dir, f"image_{idx + 1:03d}.jpeg")
+            filename_jpg = os.path.join(self.output_dir, f"image_{idx + 1:03d}.jpg")
+            if os.path.exists(filename_jpeg) or os.path.exists(filename_jpg):
                 self.downloaded_indices.add(idx)
 
         # Save updated state

@@ -59,7 +59,7 @@ pre-commit = ">=3.0.0"
 
 [tool.pixi.tasks]
 install-package = "pip install -e ."
-run = "PYTHONPATH=. python -m iiif_downloader"
+iiif-downloader = "PYTHONPATH=. python -m iiif_downloader"
 build-exe = "pyinstaller iiif-downloader.spec --clean"
 lint = "ruff check src/"
 format = "ruff format src/"
