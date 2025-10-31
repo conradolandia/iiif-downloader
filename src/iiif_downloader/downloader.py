@@ -22,6 +22,7 @@ from iiif_downloader.manifest import (
     get_image_size_from_info,
 )
 from iiif_downloader.rate_limiter import RateLimiter
+from iiif_downloader.server_capabilities import probe_server_capabilities
 
 from .constants import JSON_CONTENT_TYPES
 
@@ -117,6 +118,52 @@ def download_iiif_images(
         skipped_count = 0
         failed_count = 0
 
+        # Probe server capabilities with the first image
+        server_capabilities = None
+        if canvases:
+            console.print("[dim]Probing server capabilities...[/dim]")
+            # Find first canvas that will be downloaded (not skipped)
+            probe_canvas_idx = None
+            probe_canvas = None
+            for idx, canvas in enumerate(canvases):
+                if not resume or not file_tracker.is_downloaded(idx):
+                    probe_canvas_idx = idx
+                    probe_canvas = canvas
+                    break
+
+            if probe_canvas_idx is not None and probe_canvas is not None:
+                try:
+                    image_service_url = get_image_service_from_canvas(
+                        probe_canvas, version
+                    )
+                    if image_service_url:
+                        image_info_url = image_service_url + "/info.json"
+                        response = requests.get(
+                            image_info_url, headers=headers, timeout=10
+                        )
+                        response.raise_for_status()
+
+                        # Check content type
+                        content_type = response.headers.get("Content-Type", "")
+                        if any(
+                            json_type in content_type.lower()
+                            for json_type in JSON_CONTENT_TYPES
+                        ):
+                            info = json.loads(response.text)
+                            service_id = get_image_service_id_from_info(info)
+                            image_size = get_image_size_from_info(info, size)
+
+                            if service_id and image_size:
+                                server_capabilities = probe_server_capabilities(
+                                    service_id, image_size, headers
+                                )
+                                console.print(
+                                    f"[dim]Server format preference: .{server_capabilities.preferred_format}[/dim]"
+                                )
+                except Exception:
+                    # If probing fails, default to safe settings
+                    pass
+
         # Iterate through the canvases in the manifest
         for idx, canvas in enumerate(canvases):
             try:
@@ -187,9 +234,16 @@ def download_iiif_images(
                     failed_count += 1
                     progress.update(main_task, advance=1)
                     continue
-                # Try .jpeg first (spec recommendation), fall back to .jpg if needed
-                image_url = f"{service_id}/full/{image_size},/0/default.jpeg"
-                filename = os.path.join(base_filename, f"image_{idx + 1:03d}.jpeg")
+                # Use format from server capabilities or default to .jpeg
+                image_format = (
+                    server_capabilities.preferred_format
+                    if server_capabilities
+                    else "jpeg"
+                )
+                image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
+                filename = os.path.join(
+                    base_filename, f"image_{idx + 1:03d}.{image_format}"
+                )
 
                 # Download the image with streaming progress
                 with progress:
@@ -199,11 +253,18 @@ def download_iiif_images(
                     )
 
                     response = requests.get(image_url, headers=headers, stream=True)
-                    # If .jpeg format is not supported, try .jpg
-                    if response.status_code in (415, 404):
-                        image_url = f"{service_id}/full/{image_size},/0/default.jpg"
+                    # If format fails and we haven't probed, try fallback
+                    if not server_capabilities and response.status_code in (
+                        400,
+                        404,
+                        415,
+                    ):
+                        image_format = "jpg"
+                        image_url = (
+                            f"{service_id}/full/{image_size},/0/default.{image_format}"
+                        )
                         filename = os.path.join(
-                            base_filename, f"image_{idx + 1:03d}.jpg"
+                            base_filename, f"image_{idx + 1:03d}.{image_format}"
                         )
                         response = requests.get(image_url, headers=headers, stream=True)
                     response.raise_for_status()
@@ -248,7 +309,11 @@ def download_iiif_images(
                 console.print(
                     f"[bold red]Error downloading image {idx + 1}:[/bold red] {e}"
                 )
-                rate_limiter.handle_error(getattr(e, "response", {}).get("status_code"))
+                # Get status code from response if available
+                status_code = None
+                if hasattr(e, "response") and e.response is not None:
+                    status_code = e.response.status_code
+                rate_limiter.handle_error(status_code)
                 failed_count += 1
                 progress.update(main_task, advance=1)
             except KeyError as e:
@@ -393,7 +458,7 @@ def download_single_canvas(
 
             response = requests.get(image_url, headers=headers, stream=True)
             # If .jpeg format is not supported, try .jpg
-            if response.status_code in (415, 404):
+            if response.status_code in (400, 404, 415):
                 image_url = f"{service_id}/full/{image_size},/0/default.jpg"
                 filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
                 response = requests.get(image_url, headers=headers, stream=True)
