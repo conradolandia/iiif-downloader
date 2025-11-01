@@ -157,9 +157,30 @@ def download_iiif_images(
                                 server_capabilities = probe_server_capabilities(
                                     service_id, image_size, headers
                                 )
+                                # Display discovered capabilities
                                 console.print(
-                                    f"[dim]Server format preference: .{server_capabilities.preferred_format}[/dim]"
+                                    f"[dim]Server capabilities:[/dim] "
+                                    f"format=.{server_capabilities.preferred_format}"
                                 )
+                                if server_capabilities.max_test_size:
+                                    console.print(
+                                        f"[dim]  Max tested size: {server_capabilities.max_test_size}px[/dim]"
+                                    )
+                                if server_capabilities.supported_qualities:
+                                    qualities_str = ", ".join(
+                                        server_capabilities.supported_qualities
+                                    )
+                                    console.print(
+                                        f"[dim]  Supported qualities: {qualities_str}[/dim]"
+                                    )
+                                if server_capabilities.requires_authentication:
+                                    console.print(
+                                        "[yellow]  ⚠ Authentication may be required[/yellow]"
+                                    )
+                                if server_capabilities.rate_limit_detected:
+                                    console.print(
+                                        "[yellow]  ⚠ Rate limiting detected - using conservative limits[/yellow]"
+                                    )
                 except Exception:
                     # If probing fails, default to safe settings
                     pass
@@ -224,6 +245,14 @@ def download_iiif_images(
                     failed_count += 1
                     progress.update(main_task, advance=1)
                     continue
+
+                # Adjust size if server has a maximum tested size limit
+                if (
+                    server_capabilities
+                    and server_capabilities.max_test_size
+                    and image_size > server_capabilities.max_test_size
+                ):
+                    image_size = server_capabilities.max_test_size
 
                 # Construct the image URL
                 service_id = get_image_service_id_from_info(info)
