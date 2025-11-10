@@ -2,23 +2,81 @@
 
 import json
 import os
+from typing import Any
 
 
 class FileTracker:
     """Tracks downloaded files using a manifest file and set-based lookups."""
 
-    def __init__(self, output_dir: str, total_images: int):
+    def __init__(
+        self,
+        output_dir: str,
+        total_images: int,
+        canvases: list[dict[str, Any]] | None = None,
+    ):
         """Initialize the file tracker.
 
         Args:
             output_dir: Output directory for images
             total_images: Total number of images expected
+            canvases: List of canvas objects for label-based naming (optional)
         """
         self.output_dir = output_dir
         self.total_images = total_images
+        self.canvases = canvases
         self.manifest_file = os.path.join(output_dir, ".iiif-download-state.json")
         self.downloaded_indices: set[int] = set()
         self._load_state()
+
+    def _get_filename_for_index(
+        self, idx: int, extensions: list[str] | None = None
+    ) -> list[str]:
+        """Get possible filenames for a given index.
+
+        Args:
+            idx: Zero-based index
+            extensions: List of extensions to check (default: ['jpeg', 'jpg'])
+
+        Returns:
+            list: List of possible filenames
+        """
+        if extensions is None:
+            extensions = ["jpeg", "jpg"]
+
+        filenames = []
+
+        # Try label-based naming if canvas is available
+        if self.canvases and idx < len(self.canvases):
+            from iiif_downloader.manifest import (
+                get_canvas_label,
+                get_filename_from_canvas,
+                sanitize_filename,
+            )
+
+            canvas = self.canvases[idx]
+            # Check new hybrid naming (canvas-XXX_label.ext)
+            for ext in extensions:
+                filename = get_filename_from_canvas(canvas, idx, ext)
+                filenames.append(os.path.join(self.output_dir, filename))
+
+            # Also check old label-only naming (just label.ext) for migration
+            label = get_canvas_label(canvas)
+            if label:
+                sanitized_label = sanitize_filename(label)
+                for ext in extensions:
+                    old_label_filename = os.path.join(
+                        self.output_dir, f"{sanitized_label}.{ext}"
+                    )
+                    if old_label_filename not in filenames:
+                        filenames.append(old_label_filename)
+
+        # Always check old numeric naming for backward compatibility
+        for ext in extensions:
+            filename = os.path.join(self.output_dir, f"image_{idx + 1:03d}.{ext}")
+            if filename not in filenames:
+                filenames.append(filename)
+
+        return filenames
 
     def _load_state(self):
         """Load existing state from manifest file and scan directory."""
@@ -33,11 +91,10 @@ class FileTracker:
                 self.downloaded_indices = set()
 
         # Scan directory for existing files and update state
-        # Check for both .jpeg (preferred) and .jpg (backward compatibility)
+        # Check both label-based and numeric naming for backward compatibility
         for idx in range(self.total_images):
-            filename_jpeg = os.path.join(self.output_dir, f"image_{idx + 1:03d}.jpeg")
-            filename_jpg = os.path.join(self.output_dir, f"image_{idx + 1:03d}.jpg")
-            if os.path.exists(filename_jpeg) or os.path.exists(filename_jpg):
+            possible_filenames = self._get_filename_for_index(idx)
+            if any(os.path.exists(fname) for fname in possible_filenames):
                 self.downloaded_indices.add(idx)
 
         # Save updated state
@@ -69,6 +126,59 @@ class FileTracker:
             bool: True if the image is downloaded
         """
         return index in self.downloaded_indices
+
+    def get_existing_filename(self, index: int) -> str | None:
+        """Get the filename of an existing file for the given index.
+
+        Args:
+            index: Zero-based index of the image
+
+        Returns:
+            str: Full path to existing file, or None if not found
+        """
+        possible_filenames = self._get_filename_for_index(index)
+        for filename in possible_filenames:
+            if os.path.exists(filename):
+                return filename
+        return None
+
+    def migrate_filename_if_needed(self, index: int, target_filename: str) -> bool:
+        """Migrate old filename to new filename if needed.
+
+        If a file exists with old naming scheme but target uses new naming,
+        rename it to maintain consistency.
+
+        Args:
+            index: Zero-based index of the image
+            target_filename: Desired filename (full path)
+
+        Returns:
+            bool: True if migration occurred, False otherwise
+        """
+        existing = self.get_existing_filename(index)
+        if existing and existing != target_filename:
+            existing_basename = os.path.basename(existing)
+            target_basename = os.path.basename(target_filename)
+
+            # Check if existing uses old naming (image_XXX) and target uses new naming
+            old_pattern = f"image_{index + 1:03d}."
+            # Also check for old label-only naming (without canvas prefix)
+            # This handles migration from the previous label-only approach
+            if old_pattern in existing_basename or (
+                # Check if existing is label-only (no canvas prefix) and target has canvas prefix
+                not existing_basename.startswith("canvas-")
+                and target_basename.startswith("canvas-")
+            ):
+                try:
+                    # Ensure target directory exists
+                    os.makedirs(os.path.dirname(target_filename), exist_ok=True)
+                    # Rename the file
+                    os.rename(existing, target_filename)
+                    return True
+                except OSError:
+                    # If rename fails (e.g., target exists), don't migrate
+                    pass
+        return False
 
     def mark_downloaded(self, index: int):
         """Mark an image as downloaded.

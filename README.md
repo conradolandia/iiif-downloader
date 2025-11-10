@@ -16,6 +16,9 @@ A Python tool for downloading images from IIIF (International Image Interoperabi
 - Extract and save manifest metadata
 - Configurable image sizes
 - Download single canvas/page with `--canvas` option
+- Canvas label-based filename generation (e.g., "folio_001r", "folio_001v")
+- File size estimation when Content-Length header is missing
+- Automatic filename migration when resuming with old naming scheme
 - Build standalone executables
 
 ## Installation
@@ -105,6 +108,8 @@ When using `--resume`, the downloader:
 - Skips already downloaded images
 - Maintains fast O(1) lookups for existing files
 - Automatically detects and skips completed downloads
+- Automatically migrates old filenames to new hybrid naming scheme
+- Supports both old numeric naming (`image_001.jpeg`) and new hybrid naming (`canvas-005_folio003r.jpeg`)
 
 ### Single Canvas Download
 
@@ -121,6 +126,29 @@ iiif-downloader --source "https://example.com/manifest.json" --canvas 5
 # Download with specific size and output folder
 iiif-downloader --source "https://example.com/manifest.json" --canvas 3 --size 2048 --output "page3"
 ```
+
+### Filename Generation
+
+The downloader uses a hybrid approach combining canvas index with labels from the manifest:
+
+- **Hybrid naming**: If a canvas has a label, files use format `canvas-005_folio003r.jpeg` (index + label)
+- **Fallback naming**: If no label is available, files use numeric naming (`image_001.jpeg`, `image_002.jpeg`)
+- **Automatic sanitization**: Labels are automatically sanitized to be filesystem-safe
+- **Backward compatibility**: Old numeric filenames are automatically migrated to hybrid names when resuming
+
+Example:
+- Canvas 5 with label `"folio003r"` → saved as `canvas-005_folio003r.jpeg`
+- Canvas 10 with label `"Page 5"` → saved as `canvas-010_Page_5.jpeg`
+- Canvas 3 without label → saved as `image_003.jpeg`
+
+### File Size Estimation
+
+When servers don't provide a `Content-Length` header, the downloader estimates file size using:
+
+- **HEAD request**: Attempts to get Content-Length from a lightweight HEAD request
+- **Dimension-based estimation**: Estimates size from image dimensions and format (JPEG, PNG, TIFF)
+- **Adaptive estimation**: Refines size estimate as data is downloaded
+- **Progress tracking**: Shows percentage progress even when exact size is unknown
 
 ## Building Executable
 
@@ -142,16 +170,21 @@ pixi run build-exe
 iiif-downloader/
 ├── src/iiif_downloader/
 │   ├── __init__.py
-│   ├── __main__.py          # CLI entry point
-│   ├── cli.py                # Argument parsing
-│   ├── downloader.py         # Core download logic
-│   ├── manifest.py           # Manifest loading/parsing
-│   ├── metadata.py           # Metadata extraction
-│   ├── rate_limiter.py       # Rate limiting logic
-│   └── file_tracker.py       # File existence tracking
-├── pyproject.toml            # Package configuration
-├── pixi.toml                 # Pixi configuration
-└── iiif-downloader.spec     # PyInstaller spec
+│   ├── __main__.py              # CLI entry point
+│   ├── cli.py                    # Argument parsing
+│   ├── downloader.py             # Backward-compatible function wrappers
+│   ├── downloader_class.py        # IIIFDownloader class (core logic)
+│   ├── manifest.py               # Manifest loading/parsing, label extraction
+│   ├── metadata.py               # Metadata extraction
+│   ├── image_downloader.py       # Image downloading with size estimation
+│   ├── rate_limiter.py           # Rate limiting logic
+│   ├── file_tracker.py           # File existence tracking and migration
+│   ├── progress_columns.py       # Custom progress bar columns
+│   ├── server_capabilities.py    # Server capability detection
+│   └── download_helpers.py       # Helper functions
+├── pyproject.toml                # Package configuration
+├── pixi.toml                     # Pixi configuration
+└── iiif-downloader.spec         # PyInstaller spec
 ```
 
 ### Running Tests

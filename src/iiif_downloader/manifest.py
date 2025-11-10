@@ -208,6 +208,118 @@ def get_image_size_from_info(image_info, requested_size=None):
     return None
 
 
+def get_canvas_label(canvas: dict) -> str | None:
+    """Extract label from a canvas, handling both string and language map formats.
+
+    Args:
+        canvas: Canvas object from IIIF manifest
+
+    Returns:
+        str: Canvas label, or None if not available
+    """
+    if "label" not in canvas:
+        return None
+
+    label = canvas["label"]
+
+    # Handle language map format (dict with language codes as keys)
+    if isinstance(label, dict):
+        # Try common language codes in order of preference
+        for lang_code in ["en", "none", "default"]:
+            if lang_code in label:
+                label = label[lang_code]
+                break
+        # If no preferred language found, use the first value
+        if isinstance(label, dict) and label:
+            label = list(label.values())[0]
+        # If still a dict, return None
+        if isinstance(label, dict):
+            return None
+
+    # Handle list format (array of strings or language maps)
+    if isinstance(label, list):
+        if not label:
+            return None
+        # Get first item
+        label = label[0]
+        # If it's a dict, extract the value
+        if isinstance(label, dict):
+            for lang_code in ["en", "none", "default"]:
+                if lang_code in label:
+                    label = label[lang_code]
+                    break
+            if isinstance(label, dict) and label:
+                label = list(label.values())[0]
+            if isinstance(label, dict):
+                return None
+
+    # Convert to string if not already
+    if not isinstance(label, str):
+        return None
+
+    return label.strip() if label else None
+
+
+def sanitize_filename(name: str, max_length: int = 200) -> str:
+    """Sanitize a string to be filesystem-safe.
+
+    Args:
+        name: String to sanitize
+        max_length: Maximum length for the filename (default: 200)
+
+    Returns:
+        str: Sanitized filename-safe string
+    """
+    import re
+
+    # Remove or replace problematic characters
+    # Keep alphanumeric, spaces, hyphens, underscores, dots, and common unicode chars
+    # Replace other characters with underscores
+    sanitized = re.sub(r"[^\w\s\-\.]", "_", name)
+
+    # Replace multiple spaces/underscores with single underscore
+    sanitized = re.sub(r"[\s_]+", "_", sanitized)
+
+    # Remove leading/trailing underscores and dots
+    sanitized = sanitized.strip("_.")
+
+    # Truncate if too long
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length].rstrip("_.")
+
+    # Ensure it's not empty
+    if not sanitized:
+        return "unnamed"
+
+    return sanitized
+
+
+def get_filename_from_canvas(
+    canvas: dict, idx: int, image_format: str, fallback_prefix: str = "image"
+) -> str:
+    """Generate a filename from a canvas, using hybrid approach with label if available.
+
+    Args:
+        canvas: Canvas object from IIIF manifest
+        idx: Zero-based index of the canvas
+        image_format: Image format extension (e.g., "jpeg", "png")
+        fallback_prefix: Prefix to use if no label is available (default: "image")
+
+    Returns:
+        str: Filename (without path, with extension)
+    """
+    label = get_canvas_label(canvas)
+
+    if label:
+        # Hybrid approach: canvas index + label
+        # Format: canvas-005_folio003r.jpeg
+        sanitized_label = sanitize_filename(label)
+        return f"canvas-{idx + 1:03d}_{sanitized_label}.{image_format}"
+    else:
+        # Fall back to numeric naming
+        return f"{fallback_prefix}_{idx + 1:03d}.{image_format}"
+
+
 def load_manifest(source):
     """Load a IIIF manifest from URL or local file.
 
