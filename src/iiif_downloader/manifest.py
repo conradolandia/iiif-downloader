@@ -2,6 +2,7 @@
 
 import json
 import os
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -154,6 +155,89 @@ def detect_image_api_version(image_info):
         return "1.1"  # IIIF Image API 1.x has basic width/height
 
     return "unknown"
+
+
+def get_image_info_from_canvas_resource(
+    canvas: dict, version: str
+) -> dict[str, Any] | None:
+    """Extract image info from canvas resource when info.json is unavailable.
+
+    Args:
+        canvas: Canvas object from IIIF manifest
+        version: The detected IIIF version ('2.1' or '3.0')
+
+    Returns:
+        dict: Pseudo image info dict with width, height, format, and service ID, or None
+    """
+    if version == "2.1":
+        # IIIF v2.1: images are in images[0].resource
+        images = canvas.get("images", [])
+        if images and "resource" in images[0]:
+            resource = images[0]["resource"]
+            width = resource.get("width")
+            height = resource.get("height")
+            format_str = resource.get("format", "jpg")
+
+            # Get service ID
+            service_id = None
+            if "service" in resource:
+                service = resource["service"]
+                if isinstance(service, list) and service:
+                    service_id = service[0].get("@id")
+                elif isinstance(service, dict):
+                    service_id = service.get("@id")
+
+            if width and height and service_id:
+                # Create pseudo image_info dict
+                return {
+                    "width": width,
+                    "height": height,
+                    "@id": service_id,
+                    "id": service_id,
+                    "format": format_str,
+                }
+    elif version == "3.0":
+        # IIIF v3.0: images are in items[0].items[0].body
+        items = canvas.get("items", [])
+        if items:
+            first_item = items[0]
+            if "items" in first_item and first_item["items"]:
+                annotation = first_item["items"][0]
+                if "body" in annotation:
+                    body = annotation["body"]
+                    width = body.get("width")
+                    height = body.get("height")
+                    format_str = body.get("format", "jpg")
+
+                    # Get service ID
+                    service_id = None
+                    if "service" in body:
+                        service = body["service"]
+                        if isinstance(service, list) and service:
+                            # Prefer ImageService3 (with "id") over ImageService2 (with "@id")
+                            for svc in service:
+                                if svc.get("id"):
+                                    service_id = svc.get("id")
+                                    break
+                            if not service_id:
+                                for svc in service:
+                                    if svc.get("@id"):
+                                        service_id = svc.get("@id")
+                                        break
+                        elif isinstance(service, dict):
+                            service_id = service.get("id") or service.get("@id")
+
+                    if width and height and service_id:
+                        # Create pseudo image_info dict
+                        return {
+                            "width": width,
+                            "height": height,
+                            "@id": service_id,
+                            "id": service_id,
+                            "format": format_str,
+                        }
+
+    return None
 
 
 def get_image_service_id_from_info(image_info):

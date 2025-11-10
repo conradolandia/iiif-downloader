@@ -47,6 +47,10 @@ def main():
         action="store_true",
         help="Enable verbose output showing connection details and download progress",
     )
+    parser.add_argument(
+        "--cookies",
+        help="Path to a cookie file for session persistence (useful for servers with bot protection)",
+    )
 
     args = parser.parse_args()
 
@@ -77,6 +81,7 @@ def main():
             output_folder=args.output,
             rate_limit=rate_limit,
             verbose=args.verbose,
+            cookie_file=args.cookies,
         )
 
         if args.canvas:

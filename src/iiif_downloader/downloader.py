@@ -20,6 +20,7 @@ from iiif_downloader.manifest import (
     detect_manifest_version,
     get_canvases_from_manifest,
     get_filename_from_canvas,
+    get_image_info_from_canvas_resource,
     get_image_service_from_canvas,
     get_image_service_id_from_info,
     get_image_size_from_info,
@@ -27,6 +28,7 @@ from iiif_downloader.manifest import (
 from iiif_downloader.progress_columns import CompletedTotalColumn, FixedWidthTextColumn
 from iiif_downloader.rate_limiter import RateLimiter
 from iiif_downloader.server_capabilities import probe_server_capabilities
+from iiif_downloader.session_manager import SessionManager
 
 
 class IIIFDownloader:
@@ -39,6 +41,7 @@ class IIIFDownloader:
         output_folder: str | None = None,
         rate_limit: float | None = None,
         verbose: bool = False,
+        cookie_file: str | None = None,
     ):
         """Initialize the IIIF downloader.
 
@@ -48,14 +51,17 @@ class IIIFDownloader:
             output_folder: Output directory for images (optional)
             rate_limit: Fixed rate limit in requests per minute (None for adaptive)
             verbose: Whether to enable verbose output
+            cookie_file: Optional path to a cookie file for session persistence
         """
         self.manifest_data = manifest_data
         self.size = size
         self.output_folder = output_folder
         self.rate_limit = rate_limit
         self.verbose = verbose
+        self.cookie_file = cookie_file
 
         self.console = Console()
+        self.session_manager = SessionManager(cookie_file=cookie_file)
         self.headers = get_default_headers()
         self.base_filename = setup_output_directory(manifest_data, output_folder)
 
@@ -121,7 +127,9 @@ class IIIFDownloader:
             if not image_service_url:
                 return
 
-            info = fetch_image_info(image_service_url, self.headers, self.verbose)
+            info = fetch_image_info(
+                image_service_url, self.session_manager, self.verbose
+            )
             if not info:
                 return
 
@@ -134,7 +142,7 @@ class IIIFDownloader:
 
             if service_id and image_size:
                 self.server_capabilities = probe_server_capabilities(
-                    service_id, image_size, self.headers
+                    service_id, image_size, self.session_manager
                 )
                 self._display_server_capabilities()
 
@@ -170,6 +178,9 @@ class IIIFDownloader:
     ) -> dict[str, Any] | None:
         """Get image info for a canvas, using cached info if available.
 
+        Tries to fetch from info.json first, falls back to extracting from canvas resource
+        if info.json is unavailable (e.g., blocked by server protection).
+
         Args:
             canvas: Canvas object
             idx: Canvas index
@@ -192,7 +203,21 @@ class IIIFDownloader:
             )
             return None
 
-        info = fetch_image_info(image_service_url, self.headers, self.verbose)
+        # Try to fetch from info.json
+        info = fetch_image_info(image_service_url, self.session_manager, self.verbose)
+
+        # If info.json fetch failed, try extracting from canvas resource
+        if not info:
+            if self.verbose:
+                self.console.print(
+                    f"[dim]info.json unavailable, extracting info from canvas resource for image {idx + 1}[/dim]"
+                )
+            info = get_image_info_from_canvas_resource(canvas, self.version)
+            if info and self.verbose:
+                self.console.print(
+                    f"[dim]Extracted: {info.get('width')}x{info.get('height')}, format: {info.get('format', 'jpg')}[/dim]"
+                )
+
         return info
 
     def _prepare_image_download(
@@ -287,7 +312,7 @@ class IIIFDownloader:
             service_id,
             image_size,
             filename,
-            self.headers,
+            self.session_manager,
             self.server_capabilities,
             progress,
             download_task,
@@ -555,6 +580,20 @@ class IIIFDownloader:
 
             self.console.print("[dim]Fetching image info...[/dim]")
             info = fetch_image_info(image_service_url, self.headers, self.verbose)
+
+            # If info.json fetch failed, try extracting from canvas resource
+            if not info:
+                if self.verbose:
+                    self.console.print(
+                        "[dim]info.json unavailable, extracting info from canvas resource[/dim]"
+                    )
+                info = get_image_info_from_canvas_resource(canvas, self.version)
+                if info and self.verbose:
+                    self.console.print(
+                        f"[dim]Extracted: {info.get('width')}x{info.get('height')}, "
+                        f"format: {info.get('format', 'jpg')}[/dim]"
+                    )
+
             if not info:
                 self.console.print(
                     f"[bold red]Error: Could not fetch image info for canvas "
@@ -608,7 +647,7 @@ class IIIFDownloader:
                     service_id,
                     image_size,
                     filename,
-                    self.headers,
+                    self.session_manager,
                     None,  # No server capabilities for single canvas
                     progress,
                     task,

@@ -67,12 +67,12 @@ def _save_cached_capabilities(
         pass  # Silently fail if cache write fails
 
 
-def _test_format(service_id: str, test_size: int, headers: dict) -> tuple[str, bool]:
+def _test_format(service_id: str, test_size: int, session_manager) -> tuple[str, bool]:
     """Test format support and return (format, success)."""
     for format_option in ["jpeg", "jpg"]:
         test_url = f"{service_id}/full/{test_size},/0/default.{format_option}"
         try:
-            response = requests.head(test_url, headers=headers, timeout=5)
+            response = session_manager.head(test_url, timeout=5)
             if response.status_code == 200:
                 return format_option, True
         except requests.RequestException:
@@ -81,7 +81,7 @@ def _test_format(service_id: str, test_size: int, headers: dict) -> tuple[str, b
 
 
 def _test_maximum_size(
-    service_id: str, format_str: str, start_size: int, headers: dict
+    service_id: str, format_str: str, start_size: int, session_manager
 ) -> int | None:
     """Test progressively larger sizes to find maximum supported."""
     # Test sizes: start_size, 5000, 10000, full if available
@@ -91,7 +91,7 @@ def _test_maximum_size(
     for test_size in test_sizes:
         test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
         try:
-            response = requests.head(test_url, headers=headers, timeout=5)
+            response = session_manager.head(test_url, timeout=5)
             if response.status_code == 200:
                 max_working_size = test_size
             else:
@@ -103,7 +103,7 @@ def _test_maximum_size(
 
 
 def _test_quality_levels(
-    service_id: str, format_str: str, test_size: int, headers: dict
+    service_id: str, format_str: str, test_size: int, session_manager
 ) -> list[str]:
     """Test which quality levels are supported."""
     qualities = ["default", "color", "gray", "bitonal"]
@@ -112,7 +112,7 @@ def _test_quality_levels(
     for quality in qualities:
         test_url = f"{service_id}/full/{test_size},/0/{quality}.{format_str}"
         try:
-            response = requests.head(test_url, headers=headers, timeout=5)
+            response = session_manager.head(test_url, timeout=5)
             if response.status_code == 200:
                 supported.append(quality)
         except requests.RequestException:
@@ -122,12 +122,12 @@ def _test_quality_levels(
 
 
 def _test_authentication(
-    service_id: str, format_str: str, test_size: int, headers: dict
+    service_id: str, format_str: str, test_size: int, session_manager
 ) -> bool:
     """Test if authentication is required."""
     test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
     try:
-        response = requests.head(test_url, headers=headers, timeout=5)
+        response = session_manager.head(test_url, timeout=5)
         # Check for authentication-related status codes
         if response.status_code == 401:
             return True
@@ -140,7 +140,7 @@ def _test_authentication(
 
 
 def _test_rate_limiting(
-    service_id: str, format_str: str, test_size: int, headers: dict
+    service_id: str, format_str: str, test_size: int, session_manager
 ) -> bool:
     """Test if rate limiting is detected by making rapid requests."""
     test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
@@ -149,7 +149,7 @@ def _test_rate_limiting(
         # Make 3 rapid requests
         responses = []
         for _ in range(3):
-            response = requests.head(test_url, headers=headers, timeout=5)
+            response = session_manager.head(test_url, timeout=5)
             responses.append(response.status_code)
 
         # Check if we got 429 (Too Many Requests) or consistent delays
@@ -166,14 +166,14 @@ def _test_rate_limiting(
 
 
 def probe_server_capabilities(
-    service_id: str, sample_image_size: int, headers: dict, use_cache: bool = True
+    service_id: str, sample_image_size: int, session_manager, use_cache: bool = True
 ) -> ServerCapabilities:
     """Probe server capabilities by testing a sample image request.
 
     Args:
         service_id: The image service ID (from image info)
         sample_image_size: The size to test (width in pixels)
-        headers: HTTP headers to use for requests
+        session_manager: SessionManager instance for making requests
         use_cache: Whether to use cached capabilities if available
 
     Returns:
@@ -191,31 +191,37 @@ def probe_server_capabilities(
             return cached
 
     # Test format support
-    format_to_test, format_works = _test_format(service_id, sample_image_size, headers)
+    format_to_test, format_works = _test_format(
+        service_id, sample_image_size, session_manager
+    )
 
     # If format doesn't work at requested size, try smaller size
     test_size = sample_image_size
     if not format_works:
-        format_to_test, _ = _test_format(service_id, 500, headers)
+        format_to_test, _ = _test_format(service_id, 500, session_manager)
         test_size = 500
 
     # Test maximum supported size
-    max_size = _test_maximum_size(service_id, format_to_test, test_size, headers)
+    max_size = _test_maximum_size(
+        service_id, format_to_test, test_size, session_manager
+    )
 
     # Determine if server supports the requested full size
     supports_full_size = max_size is not None and max_size >= sample_image_size
 
     # Test quality levels
     supported_qualities = _test_quality_levels(
-        service_id, format_to_test, test_size, headers
+        service_id, format_to_test, test_size, session_manager
     )
 
     # Test authentication
-    requires_auth = _test_authentication(service_id, format_to_test, test_size, headers)
+    requires_auth = _test_authentication(
+        service_id, format_to_test, test_size, session_manager
+    )
 
     # Test rate limiting
     rate_limit_detected = _test_rate_limiting(
-        service_id, format_to_test, test_size, headers
+        service_id, format_to_test, test_size, session_manager
     )
 
     capabilities = ServerCapabilities(

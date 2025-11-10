@@ -6,6 +6,11 @@ import os
 import requests
 from rich.console import Console
 
+from .auth_detector import (
+    get_auth_error_message,
+    is_authentication_required,
+    is_recaptcha_page,
+)
 from .constants import JSON_CONTENT_TYPES
 
 
@@ -51,21 +56,27 @@ def estimate_file_size_from_dimensions(
 
 
 def get_content_length_from_head(
-    image_url: str, headers: dict, timeout: tuple[int, int] = (30, 60)
+    image_url: str, session_manager, timeout: tuple[int, int] = (30, 60)
 ) -> int | None:
     """Get Content-Length from HEAD request.
 
     Args:
         image_url: URL of the image to download
-        headers: HTTP headers to use
+        session_manager: SessionManager instance for making requests
         timeout: Connection and read timeout tuple
 
     Returns:
         int: Content-Length in bytes, or None if not available
     """
     try:
-        response = requests.head(image_url, headers=headers, timeout=timeout)
+        response = session_manager.head(image_url, timeout=timeout)
         response.raise_for_status()
+
+        # Check for authentication/bot protection
+        if is_authentication_required(response):
+            # Don't print error here, it will be caught in download_image_stream
+            return None
+
         content_length = response.headers.get("content-length")
         if content_length:
             return int(content_length)
@@ -75,12 +86,12 @@ def get_content_length_from_head(
     return None
 
 
-def fetch_image_info(image_service_url, headers, verbose=False):
+def fetch_image_info(image_service_url, session_manager, verbose=False):
     """Fetch and parse image info from IIIF image service.
 
     Args:
         image_service_url: URL of the image service
-        headers: HTTP headers to use
+        session_manager: SessionManager instance for making requests
         verbose: Whether to print verbose output
 
     Returns:
@@ -93,18 +104,40 @@ def fetch_image_info(image_service_url, headers, verbose=False):
         console.print(f"[dim]Fetching image info: {image_info_url}[/dim]")
 
     try:
-        response = requests.get(image_info_url, headers=headers, timeout=30)
+        response = session_manager.get(image_info_url, timeout=30)
         response.raise_for_status()
+
+        # Check for authentication/bot protection
+        if is_authentication_required(response):
+            error_msg = get_auth_error_message(
+                image_info_url, session_manager.cookie_file, response
+            )
+            console.print(error_msg)
+            return None
 
         # Check if the content type is JSON (including JSON-LD and other JSON variants)
         content_type = response.headers.get("Content-Type", "")
         if not any(
             json_type in content_type.lower() for json_type in JSON_CONTENT_TYPES
         ):
-            if verbose:
-                console.print(
-                    f"[yellow]Warning:[/yellow] Image info response not JSON. Content-Type: {content_type}"
-                )
+            # Check if it's HTML (might be an error page)
+            if "text/html" in content_type.lower():
+                if is_recaptcha_page(response):
+                    error_msg = get_auth_error_message(
+                        image_info_url, session_manager.cookie_file, response
+                    )
+                    console.print(error_msg)
+                else:
+                    console.print(
+                        f"[yellow]Warning:[/yellow] Server returned HTML instead of JSON. "
+                        f"Content-Type: {content_type}"
+                    )
+            else:
+                if verbose:
+                    console.print(
+                        f"[yellow]Warning:[/yellow] Image info response not JSON. "
+                        f"Content-Type: {content_type}"
+                    )
             return None
 
         # Parse JSON
@@ -124,7 +157,7 @@ def download_image_stream(
     service_id,
     image_size,
     filename,
-    headers,
+    session_manager,
     server_capabilities=None,
     progress=None,
     task=None,
@@ -137,7 +170,7 @@ def download_image_stream(
         service_id: Image service ID
         image_size: Desired image width
         filename: Output filename
-        headers: HTTP headers to use
+        session_manager: SessionManager instance for making requests
         server_capabilities: Server capabilities (optional)
         progress: Rich Progress object (optional)
         task: Progress task ID (optional)
@@ -163,7 +196,7 @@ def download_image_stream(
 
     # Try to get Content-Length from HEAD request first
     estimated_size = None
-    content_length = get_content_length_from_head(image_url, headers, timeout)
+    content_length = get_content_length_from_head(image_url, session_manager, timeout)
 
     # If HEAD request didn't provide Content-Length, try to estimate from image info
     if content_length is None and image_info:
@@ -189,9 +222,15 @@ def download_image_stream(
                 )
 
     try:
-        response = requests.get(
-            image_url, headers=headers, stream=True, timeout=timeout
-        )
+        response = session_manager.get(image_url, stream=True, timeout=timeout)
+
+        # Check for authentication/bot protection before processing
+        if is_authentication_required(response):
+            error_msg = get_auth_error_message(
+                image_url, session_manager.cookie_file, response
+            )
+            console.print(error_msg)
+            return False, filename, 0, 0
 
         # If format fails and we haven't probed, try fallback
         if not server_capabilities and response.status_code in (400, 404, 415):
@@ -202,11 +241,32 @@ def download_image_stream(
             filename = f"{base}.{image_format}"
             if verbose:
                 console.print(f"[dim]Format fallback, retrying with: {image_url}[/dim]")
-            response = requests.get(
-                image_url, headers=headers, stream=True, timeout=timeout
-            )
+            response = session_manager.get(image_url, stream=True, timeout=timeout)
+
+            # Check again after retry
+            if is_authentication_required(response):
+                error_msg = get_auth_error_message(
+                    image_url, session_manager.cookie_file, response
+                )
+                console.print(error_msg)
+                return False, filename, 0, 0
 
         response.raise_for_status()
+
+        # Check if response is actually an image
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" in content_type:
+            if is_recaptcha_page(response):
+                error_msg = get_auth_error_message(
+                    image_url, session_manager.cookie_file, response
+                )
+                console.print(error_msg)
+            else:
+                console.print(
+                    f"[red]Error:[/red] Server returned HTML instead of image. "
+                    f"Content-Type: {content_type}"
+                )
+            return False, filename, 0, 0
 
         if verbose:
             console.print(
