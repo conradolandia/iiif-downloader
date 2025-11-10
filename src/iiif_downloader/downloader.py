@@ -1,6 +1,5 @@
-"""Core download functionality with progress tracking."""
+"""Main download orchestration functions."""
 
-import json
 import os
 
 import requests
@@ -8,12 +7,16 @@ from rich.console import Console
 from rich.progress import (
     BarColumn,
     Progress,
+    ProgressColumn,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.text import Text
 
+from iiif_downloader.download_helpers import get_default_headers, setup_output_directory
 from iiif_downloader.file_tracker import FileTracker
+from iiif_downloader.image_downloader import download_image_stream, fetch_image_info
 from iiif_downloader.manifest import (
     detect_manifest_version,
     get_canvases_from_manifest,
@@ -24,11 +27,44 @@ from iiif_downloader.manifest import (
 from iiif_downloader.rate_limiter import RateLimiter
 from iiif_downloader.server_capabilities import probe_server_capabilities
 
-from .constants import JSON_CONTENT_TYPES
+
+class CompletedTotalColumn(ProgressColumn):
+    """Custom column that shows 'Unknown' instead of 'None' when total is None."""
+
+    def render(self, task):
+        """Render the completed/total display."""
+        completed = task.completed or 0
+        total = task.total
+        if total is None:
+            return Text(f"{completed}/Unknown", style="bold green")
+        return Text(f"{completed}/{total}", style="bold green")
+
+
+class FixedWidthTextColumn(ProgressColumn):
+    """Text column with fixed width to maintain alignment."""
+
+    def __init__(self, width=30, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.width = width
+
+    def render(self, task):
+        """Render text with fixed width."""
+        text = task.description or ""
+        # Truncate or pad to fixed width
+        if len(text) > self.width:
+            text = text[: self.width - 3] + "..."
+        else:
+            text = text.ljust(self.width)
+        return Text(text, style="bold blue")
 
 
 def download_iiif_images(
-    manifest_data, size=None, output_folder=None, resume=False, rate_limit=None
+    manifest_data,
+    size=None,
+    output_folder=None,
+    resume=False,
+    rate_limit=None,
+    verbose=False,
 ):
     """Download IIIF images with progress tracking and rate limiting.
 
@@ -38,31 +74,13 @@ def download_iiif_images(
         output_folder: Output directory for images (optional)
         resume: Whether to resume interrupted downloads
         rate_limit: Fixed rate limit in requests per minute (None for adaptive)
+        verbose: Whether to enable verbose output
     """
     console = Console()
 
-    # Headers to mimic a browser
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
-    # Determine output directory
-    if output_folder:
-        base_filename = output_folder
-    else:
-        # Extract the base filename
-        if "filename" in manifest_data:
-            base_filename = os.path.splitext(manifest_data["filename"])[0]
-        else:
-            base_filename = "iiif_images"
-
-    # Create a directory to store the downloaded images
-    os.makedirs(base_filename, exist_ok=True)
+    # Get headers and setup output directory
+    headers = get_default_headers()
+    base_filename = setup_output_directory(manifest_data, output_folder)
 
     manifest = manifest_data["content"]
     version = detect_manifest_version(manifest)
@@ -95,11 +113,11 @@ def download_iiif_images(
 
     # Initialize progress tracking
     with Progress(
-        TextColumn("[bold blue]{task.description}"),
+        FixedWidthTextColumn(width=50),
         BarColumn(),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
         TextColumn("•"),
-        TextColumn("[bold green]{task.completed}/{task.total}"),
+        CompletedTotalColumn(),
         TextColumn("•"),
         TimeElapsedColumn(),
         TextColumn("•"),
@@ -107,19 +125,41 @@ def download_iiif_images(
         console=console,
         expand=True,
     ) as progress:
-        # Main progress task
+        # Track statistics
+        skipped_count = 0
+        failed_count = 0
+        newly_downloaded_count = 0  # Track only files downloaded in this run
+
+        # Main progress task with initial statistics
+        initial_desc = (
+            f"DL:{newly_downloaded_count:3d} "
+            f"SK:{skipped_count:3d} "
+            f"FL:{failed_count:2d} "
+            f"T:{downloaded_count:3d}/{total_images} "
+            f"R:  0.0"
+        )
         main_task = progress.add_task(
-            "[bold blue]Downloading images",
+            initial_desc,
             total=total_images,
             completed=downloaded_count,
         )
 
-        # Track statistics
-        skipped_count = 0
-        failed_count = 0
+        def update_status_description():
+            """Update the progress bar description with current statistics."""
+            current_rate = rate_limiter.get_current_rate()
+            desc = (
+                f"DL:{newly_downloaded_count:3d} "
+                f"SK:{skipped_count:3d} "
+                f"FL:{failed_count:2d} "
+                f"T:{file_tracker.get_downloaded_count():3d}/{total_images} "
+                f"R:{current_rate:5.1f}"
+            )
+            progress.update(main_task, description=desc)
 
         # Probe server capabilities with the first image
         server_capabilities = None
+        probed_image_info = None  # Cache the probed image info
+        probed_image_idx = None  # Track which image was probed
         if canvases:
             console.print("[dim]Probing server capabilities...[/dim]")
             # Find first canvas that will be downloaded (not skipped)
@@ -137,19 +177,12 @@ def download_iiif_images(
                         probe_canvas, version
                     )
                     if image_service_url:
-                        image_info_url = image_service_url + "/info.json"
-                        response = requests.get(
-                            image_info_url, headers=headers, timeout=10
-                        )
-                        response.raise_for_status()
+                        info = fetch_image_info(image_service_url, headers, verbose)
+                        if info:
+                            # Cache the probed image info to avoid fetching again
+                            probed_image_info = info
+                            probed_image_idx = probe_canvas_idx
 
-                        # Check content type
-                        content_type = response.headers.get("Content-Type", "")
-                        if any(
-                            json_type in content_type.lower()
-                            for json_type in JSON_CONTENT_TYPES
-                        ):
-                            info = json.loads(response.text)
                             service_id = get_image_service_id_from_info(info)
                             image_size = get_image_size_from_info(info, size)
 
@@ -191,50 +224,38 @@ def download_iiif_images(
                 # Check if file already exists and resume is enabled
                 if resume and file_tracker.is_downloaded(idx):
                     skipped_count += 1
-                    progress.update(main_task, advance=1)
+                    # Don't advance progress bar - these files were already counted
+                    # in the initial completed count
+                    # Update description with current statistics
+                    update_status_description()
                     continue
 
                 # Rate limiting
                 rate_limiter.wait_if_needed()
 
-                # Fetch image info
-                image_service_url = get_image_service_from_canvas(canvas, version)
-                if not image_service_url:
-                    console.print(
-                        f"[bold red]Error: Could not find image service URL for canvas {idx + 1}[/bold red]"
-                    )
-                    failed_count += 1
-                    progress.update(main_task, advance=1)
-                    continue
+                # Fetch image info (reuse cached info if this is the probed image)
+                if idx == probed_image_idx and probed_image_info is not None:
+                    info = probed_image_info
+                    if verbose:
+                        console.print(
+                            f"[dim]Using cached image info for image {idx + 1}[/dim]"
+                        )
+                else:
+                    image_service_url = get_image_service_from_canvas(canvas, version)
+                    if not image_service_url:
+                        console.print(
+                            f"[bold red]Error: Could not find image service URL for canvas {idx + 1}[/bold red]"
+                        )
+                        failed_count += 1
+                        progress.update(main_task, advance=1)
+                        continue
 
-                image_info_url = image_service_url + "/info.json"
-
-                response = requests.get(image_info_url, headers=headers)
-                response.raise_for_status()
-
-                # Check if the content type is JSON (including JSON-LD and other JSON variants)
-                content_type = response.headers.get("Content-Type", "")
-                if not any(
-                    json_type in content_type.lower()
-                    for json_type in JSON_CONTENT_TYPES
-                ):
-                    console.print(
-                        f"[bold red]Warning:[/bold red] Image info response not JSON. Content-Type: {content_type}"
-                    )
-                    failed_count += 1
-                    progress.update(main_task, advance=1)
-                    continue
-
-                # Try to parse JSON
-                try:
-                    info = json.loads(response.text)
-                except json.JSONDecodeError as e:
-                    console.print(
-                        f"[bold red]Error decoding image info JSON:[/bold red] {e}"
-                    )
-                    failed_count += 1
-                    progress.update(main_task, advance=1)
-                    continue
+                    # Fetch image info
+                    info = fetch_image_info(image_service_url, headers, verbose)
+                    if not info:
+                        failed_count += 1
+                        progress.update(main_task, advance=1)
+                        continue
 
                 # Determine the size to use using modular function
                 image_size = get_image_size_from_info(info, size)
@@ -263,13 +284,13 @@ def download_iiif_images(
                     failed_count += 1
                     progress.update(main_task, advance=1)
                     continue
-                # Use format from server capabilities or default to .jpeg
+
+                # Determine initial format and filename
                 image_format = (
                     server_capabilities.preferred_format
                     if server_capabilities
                     else "jpeg"
                 )
-                image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
                 filename = os.path.join(
                     base_filename, f"image_{idx + 1:03d}.{image_format}"
                 )
@@ -277,62 +298,59 @@ def download_iiif_images(
                 # Download the image with streaming progress
                 with progress:
                     download_task = progress.add_task(
-                        f"[bold cyan]Downloading image {idx + 1}",
+                        f"Downloading image {idx + 1}",
                         total=None,  # Unknown size, will update as we go
                     )
 
-                    response = requests.get(image_url, headers=headers, stream=True)
-                    # If format fails and we haven't probed, try fallback
-                    if not server_capabilities and response.status_code in (
-                        400,
-                        404,
-                        415,
-                    ):
-                        image_format = "jpg"
-                        image_url = (
-                            f"{service_id}/full/{image_size},/0/default.{image_format}"
-                        )
-                        filename = os.path.join(
-                            base_filename, f"image_{idx + 1:03d}.{image_format}"
-                        )
-                        response = requests.get(image_url, headers=headers, stream=True)
-                    response.raise_for_status()
+                    (
+                        success,
+                        final_filename,
+                        downloaded_bytes,
+                        chunk_count,
+                    ) = download_image_stream(
+                        service_id,
+                        image_size,
+                        filename,
+                        headers,
+                        server_capabilities,
+                        progress,
+                        download_task,
+                        verbose,
+                    )
 
-                    # Get content length if available
-                    content_length = response.headers.get("content-length")
-                    if content_length:
-                        progress.update(download_task, total=int(content_length))
+                    if not success:
+                        failed_count += 1
+                        progress.update(main_task, advance=1)
+                        progress.remove_task(download_task)
+                        continue
 
-                    # Download with progress tracking
-                    downloaded_bytes = 0
-                    with open(filename, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                                downloaded_bytes += len(chunk)
-                                if content_length:
-                                    progress.update(
-                                        download_task, completed=downloaded_bytes
-                                    )
+                    # Update filename in case format fallback occurred
+                    filename = final_filename
+
+                    # Log download statistics in verbose mode
+                    if verbose:
+                        file_size = os.path.getsize(filename)
+                        size_str = (
+                            f"{file_size / 1024 / 1024:.1f} MB"
+                            if file_size > 1024 * 1024
+                            else f"{file_size / 1024:.1f} KB"
+                        )
+                        console.print(
+                            f"[dim]Image {idx + 1}: {size_str} "
+                            f"({downloaded_bytes} bytes, {chunk_count} chunks)[/dim]"
+                        )
 
                     # Remove the download task
                     progress.remove_task(download_task)
 
                 # Mark as downloaded and update progress
                 file_tracker.mark_downloaded(idx)
+                newly_downloaded_count += 1
                 rate_limiter.handle_success()
                 progress.update(main_task, advance=1)
 
-                # Update status
-                current_rate = rate_limiter.get_current_rate()
-                status_text = f"Downloaded: {file_tracker.get_downloaded_count()}/{total_images} | "
-                status_text += f"Skipped: {skipped_count} | Failed: {failed_count} | "
-                status_text += f"Rate: {current_rate:.1f} req/min"
-
-                progress.update(
-                    main_task,
-                    description=f"[bold blue]Downloading images - {status_text}",
-                )
+                # Update status with fixed-width format for alignment
+                update_status_description()
 
             except requests.RequestException as e:
                 console.print(
@@ -345,30 +363,40 @@ def download_iiif_images(
                 rate_limiter.handle_error(status_code)
                 failed_count += 1
                 progress.update(main_task, advance=1)
+                # Update description with current statistics
+                update_status_description()
             except KeyError as e:
                 console.print(
                     f"[bold red]Error accessing manifest data for image {idx + 1}:[/bold red] {e}"
                 )
                 failed_count += 1
                 progress.update(main_task, advance=1)
+                # Update description with current statistics
+                update_status_description()
             except Exception as e:
                 console.print(
                     f"[bold red]Unexpected error processing image {idx + 1}:[/bold red] {e}"
                 )
                 failed_count += 1
                 progress.update(main_task, advance=1)
+                # Update description with current statistics
+                update_status_description()
 
         # Final status
         console.print("\n[bold green]Download completed![/bold green]")
-        console.print(
-            f"Downloaded: {file_tracker.get_downloaded_count() - skipped_count}"
-        )
+        console.print(f"Downloaded: {newly_downloaded_count}")
         console.print(f"Skipped: {skipped_count}")
         console.print(f"Failed: {failed_count}")
+        console.print(f"Total: {file_tracker.get_downloaded_count()}/{total_images}")
 
 
 def download_single_canvas(
-    manifest_data, canvas_index, size=None, output_folder=None, rate_limit=None
+    manifest_data,
+    canvas_index,
+    size=None,
+    output_folder=None,
+    rate_limit=None,
+    verbose=False,
 ):
     """Download a single canvas/page from a IIIF manifest.
 
@@ -378,31 +406,13 @@ def download_single_canvas(
         size: Desired image width (optional)
         output_folder: Output directory for images (optional)
         rate_limit: Fixed rate limit in requests per minute (None for adaptive)
+        verbose: Whether to enable verbose output
     """
     console = Console()
 
-    # Headers to mimic a browser
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "DNT": "1",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-    }
-
-    # Determine output directory
-    if output_folder:
-        base_filename = output_folder
-    else:
-        # Extract the base filename
-        if "filename" in manifest_data:
-            base_filename = os.path.splitext(manifest_data["filename"])[0]
-        else:
-            base_filename = "iiif_images"
-
-    # Create a directory to store the downloaded images
-    os.makedirs(base_filename, exist_ok=True)
+    # Get headers and setup output directory
+    headers = get_default_headers()
+    base_filename = setup_output_directory(manifest_data, output_folder)
 
     manifest = manifest_data["content"]
     version = detect_manifest_version(manifest)
@@ -445,14 +455,13 @@ def download_single_canvas(
             )
             return
 
-        image_info_url = image_service_url + "/info.json"
-
         console.print("[dim]Fetching image info...[/dim]")
-        response = requests.get(image_info_url, headers=headers)
-        response.raise_for_status()
-
-        # Parse image info
-        info = json.loads(response.text)
+        info = fetch_image_info(image_service_url, headers, verbose)
+        if not info:
+            console.print(
+                f"[bold red]Error: Could not fetch image info for canvas {canvas_index}[/bold red]"
+            )
+            return
 
         # Determine image size using modular function
         image_size = get_image_size_from_info(info, size)
@@ -469,8 +478,8 @@ def download_single_canvas(
                 f"[bold red]Error: No service ID found in image info for canvas {canvas_index}[/bold red]"
             )
             return
+
         # Try .jpeg first (spec recommendation), fall back to .jpg if needed
-        image_url = f"{service_id}/full/{image_size},/0/default.jpeg"
         filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpeg")
 
         console.print("[dim]Downloading image...[/dim]")
@@ -483,38 +492,34 @@ def download_single_canvas(
             console=console,
             expand=True,
         ) as progress:
-            task = progress.add_task("Downloading", total=100)
+            task = progress.add_task("Downloading", total=None)
 
-            response = requests.get(image_url, headers=headers, stream=True)
-            # If .jpeg format is not supported, try .jpg
-            if response.status_code in (400, 404, 415):
-                image_url = f"{service_id}/full/{image_size},/0/default.jpg"
-                filename = os.path.join(base_filename, f"canvas_{canvas_index:03d}.jpg")
-                response = requests.get(image_url, headers=headers, stream=True)
-            response.raise_for_status()
+            (
+                success,
+                final_filename,
+                downloaded_bytes,
+                chunk_count,
+            ) = download_image_stream(
+                service_id,
+                image_size,
+                filename,
+                headers,
+                None,  # No server capabilities for single canvas
+                progress,
+                task,
+                verbose,
+            )
 
-            content_length = response.headers.get("content-length")
-            total_bytes = int(content_length) if content_length else 0
-            downloaded_bytes = 0
+            if not success:
+                console.print(
+                    f"[bold red]Error downloading canvas {canvas_index}[/bold red]"
+                )
+                return
 
-            with open(filename, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
+            # Update filename in case format fallback occurred
+            filename = final_filename
 
-                        # Update progress
-                        if total_bytes > 0:
-                            progress.update(
-                                task, completed=(downloaded_bytes / total_bytes) * 100
-                            )
-                        else:
-                            # If we don't know total size, just show activity
-                            progress.update(
-                                task,
-                                completed=min(95, downloaded_bytes / 1024 / 1024 * 10),
-                            )
-
+            # Update progress to 100% for completion
             progress.update(task, completed=100)
 
         console.print(
@@ -522,7 +527,7 @@ def download_single_canvas(
         )
         console.print(f"[dim]Saved as: {filename}[/dim]")
 
-        # Show file size
+        # Show file size and download statistics
         if os.path.exists(filename):
             file_size = os.path.getsize(filename)
             if file_size > 1024 * 1024:
@@ -530,6 +535,10 @@ def download_single_canvas(
             else:
                 size_str = f"{file_size / 1024:.1f} KB"
             console.print(f"[dim]File size: {size_str}[/dim]")
+            if verbose:
+                console.print(
+                    f"[dim]Downloaded: {downloaded_bytes} bytes in {chunk_count} chunks[/dim]"
+                )
 
     except requests.RequestException as e:
         console.print(

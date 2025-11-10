@@ -41,6 +41,12 @@ def main():
         type=int,
         help="Download only a specific canvas/page (1-based index)",
     )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose output showing connection details and download progress",
+    )
 
     args = parser.parse_args()
 
@@ -68,12 +74,22 @@ def main():
         if args.canvas:
             print(f"📥 Downloading canvas {args.canvas}...")
             download_single_canvas(
-                manifest_data, args.canvas, args.size, args.output, rate_limit
+                manifest_data,
+                args.canvas,
+                args.size,
+                args.output,
+                rate_limit,
+                args.verbose,
             )
         else:
             print("📥 Starting download...")
             download_iiif_images(
-                manifest_data, args.size, args.output, args.resume, rate_limit
+                manifest_data,
+                args.size,
+                args.output,
+                args.resume,
+                rate_limit,
+                args.verbose,
             )
     else:
         print(" ❌")
