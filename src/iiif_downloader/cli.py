@@ -3,7 +3,7 @@
 import argparse
 import sys
 
-from iiif_downloader.downloader import download_iiif_images, download_single_canvas
+from iiif_downloader.downloader import IIIFDownloader
 from iiif_downloader.manifest import load_manifest
 from iiif_downloader.metadata import save_metadata
 
@@ -71,26 +71,20 @@ def main():
             save_metadata(manifest_data, args.output)
 
         # Download images
+        downloader = IIIFDownloader(
+            manifest_data=manifest_data,
+            size=args.size,
+            output_folder=args.output,
+            rate_limit=rate_limit,
+            verbose=args.verbose,
+        )
+
         if args.canvas:
             print(f"📥 Downloading canvas {args.canvas}...")
-            download_single_canvas(
-                manifest_data,
-                args.canvas,
-                args.size,
-                args.output,
-                rate_limit,
-                args.verbose,
-            )
+            downloader.download_one(args.canvas)
         else:
             print("📥 Starting download...")
-            download_iiif_images(
-                manifest_data,
-                args.size,
-                args.output,
-                args.resume,
-                rate_limit,
-                args.verbose,
-            )
+            downloader.download_all(resume=args.resume)
     else:
         print(" ❌")
         sys.exit(1)

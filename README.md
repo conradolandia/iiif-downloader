@@ -171,19 +171,18 @@ iiif-downloader/
 ├── src/iiif_downloader/
 │   ├── __init__.py
 │   ├── __main__.py              # CLI entry point
-│   ├── cli.py                    # Argument parsing
-│   ├── downloader.py             # Backward-compatible function wrappers
-│   ├── downloader_class.py        # IIIFDownloader class (core logic)
-│   ├── manifest.py               # Manifest loading/parsing, label extraction
-│   ├── metadata.py               # Metadata extraction
-│   ├── image_downloader.py       # Image downloading with size estimation
-│   ├── rate_limiter.py           # Rate limiting logic
-│   ├── file_tracker.py           # File existence tracking and migration
-│   ├── progress_columns.py       # Custom progress bar columns
-│   ├── server_capabilities.py    # Server capability detection
-│   └── download_helpers.py       # Helper functions
-├── pyproject.toml                # Package configuration
-├── pixi.toml                     # Pixi configuration
+│   ├── cli.py                   # Argument parsing
+│   ├── downloader.py            # IIIFDownloader class (core logic)
+│   ├── manifest.py              # Manifest loading/parsing, label extraction
+│   ├── metadata.py              # Metadata extraction
+│   ├── image_downloader.py      # Image downloading with size estimation
+│   ├── rate_limiter.py          # Rate limiting logic
+│   ├── file_tracker.py          # File existence tracking and migration
+│   ├── progress_columns.py      # Custom progress bar columns
+│   ├── server_capabilities.py   # Server capability detection
+│   └── download_helpers.py      # Helper functions
+├── pyproject.toml               # Package configuration
+├── pixi.toml                    # Pixi configuration
 └── iiif-downloader.spec         # PyInstaller spec
 ```
 
