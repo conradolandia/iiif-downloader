@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from iiif_downloader.download_helpers import get_default_headers
+
 
 def detect_manifest_version(manifest_content):
     """Detect the IIIF Presentation API version of a manifest.
@@ -416,7 +418,7 @@ def load_manifest(source):
     if source.startswith("http://") or source.startswith("https://"):
         # It's a URL
         try:
-            response = requests.get(source)
+            response = requests.get(source, headers=get_default_headers())
             response.raise_for_status()
             content = json.loads(response.text)
             return {
