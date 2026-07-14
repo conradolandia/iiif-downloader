@@ -18,6 +18,36 @@ def is_html_response(response: Any) -> bool:
     )
 
 
+def is_cloudflare_challenge(response: Any) -> bool:
+    """Check if a response is a Cloudflare bot challenge.
+
+    Args:
+        response: requests.Response object
+
+    Returns:
+        bool: True if a Cloudflare challenge is detected, False otherwise
+    """
+    headers = response.headers
+    if headers.get("cf-mitigated", "").lower() == "challenge":
+        return True
+
+    server = headers.get("server", "").lower()
+    if "cloudflare" in server and response.status_code in (403, 503):
+        if is_html_response(response):
+            text = response.text.lower()
+            cloudflare_indicators = [
+                "just a moment...",
+                "cf-browser-verification",
+                "cf-challenge",
+                "challenge-platform",
+                "cdn-cgi/challenge",
+                "attention required",
+            ]
+            return any(indicator in text for indicator in cloudflare_indicators)
+
+    return False
+
+
 def is_recaptcha_page(response: Any) -> bool:
     """Check if a response contains a reCAPTCHA challenge.
 
@@ -61,8 +91,8 @@ def is_authentication_required(response: Any) -> bool:
     if "www-authenticate" in response.headers:
         return True
 
-    # Check if it's a reCAPTCHA page
-    if is_recaptcha_page(response):
+    # Check if it's a Cloudflare or reCAPTCHA challenge
+    if is_cloudflare_challenge(response) or is_recaptcha_page(response):
         return True
 
     # Check for common authentication page indicators
@@ -95,18 +125,27 @@ def get_auth_error_message(
     """
     message = "\n[bold red]Authentication or Bot Protection Detected[/bold red]\n"
     message += "=" * 70 + "\n\n"
-    message += "The server is blocking requests with bot protection (reCAPTCHA).\n\n"
+    message += (
+        "The server is blocking automated requests "
+        "(bot protection / Cloudflare / reCAPTCHA).\n\n"
+    )
 
-    if is_recaptcha_page(response) if response else False:
-        message += "[yellow]Detected: reCAPTCHA challenge[/yellow]\n\n"
+    if response is not None:
+        if is_cloudflare_challenge(response):
+            message += "[yellow]Detected: Cloudflare challenge[/yellow]\n\n"
+        elif is_recaptcha_page(response):
+            message += "[yellow]Detected: reCAPTCHA challenge[/yellow]\n\n"
 
     message += "[bold]Solution:[/bold]\n"
-    message += "1. Open this URL in your browser to authenticate:\n"
+    message += "1. Open this URL in your browser:\n"
     message += f"   {url}\n\n"
-    message += "2. Complete any reCAPTCHA or login required\n"
-    message += "3. Export cookies from your browser:\n"
-    message += "   - Chrome/Edge: Use extension 'Get cookies.txt LOCALLY'\n"
-    message += "   - Firefox: Use extension 'cookies.txt' or 'Cookie-Editor'\n\n"
+    message += "2. Complete any Cloudflare, reCAPTCHA, or login challenge\n"
+    message += "3. Either:\n"
+    message += "   a) Save the manifest JSON from the browser and pass the local file\n"
+    message += "      as --source, or\n"
+    message += "   b) Export cookies from your browser:\n"
+    message += "      - Chrome/Edge: Use extension 'Get cookies.txt LOCALLY'\n"
+    message += "      - Firefox: Use extension 'cookies.txt' or 'Cookie-Editor'\n\n"
 
     if cookie_file:
         message += f"4. Save cookies to: {cookie_file}\n"
@@ -115,7 +154,7 @@ def get_auth_error_message(
         message += "4. Save cookies to a file (Netscape/Mozilla format)\n"
         message += "5. Run the downloader with: --cookies /path/to/cookies.txt\n\n"
 
-    message += "[dim]Note: The session manager will automatically use cookies from the file[/dim]\n"
+    message += "[dim]Note: Cookies are used for both manifest fetch and image downloads[/dim]\n"
     message += "=" * 70 + "\n"
 
     return message

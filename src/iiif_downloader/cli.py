@@ -66,7 +66,7 @@ def main():
     print("🔄 Loading manifest...", end="", flush=True)
     sys.stdout.flush()
 
-    manifest_data = load_manifest(args.source)
+    manifest_data = load_manifest(args.source, cookie_file=args.cookies)
     if manifest_data:
         print(" ✅")
 

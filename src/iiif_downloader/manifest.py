@@ -6,8 +6,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from rich.console import Console
 
-from iiif_downloader.download_helpers import get_default_headers
+from iiif_downloader.auth_detector import (
+    get_auth_error_message,
+    is_authentication_required,
+)
+from iiif_downloader.session_manager import SessionManager
 
 
 def detect_manifest_version(manifest_content):
@@ -406,25 +411,33 @@ def get_filename_from_canvas(
         return f"{fallback_prefix}_{idx + 1:03d}.{image_format}"
 
 
-def load_manifest(source):
+def load_manifest(source: str, cookie_file: str | None = None) -> dict[str, Any] | None:
     """Load a IIIF manifest from URL or local file.
 
     Args:
         source: URL or file path of the IIIF manifest
+        cookie_file: Optional path to a cookie file for bot-protected hosts
 
     Returns:
         dict: Manifest data with 'content' and 'filename' keys, or None if error
     """
     if source.startswith("http://") or source.startswith("https://"):
-        # It's a URL
+        console = Console()
         try:
-            response = requests.get(source, headers=get_default_headers())
-            response.raise_for_status()
-            content = json.loads(response.text)
-            return {
-                "content": content,
-                "filename": os.path.basename(urlparse(source).path),
-            }
+            with SessionManager(cookie_file=cookie_file) as session_manager:
+                response = session_manager.get(source, timeout=30)
+
+                if is_authentication_required(response):
+                    print()  # end the CLI "Loading manifest..." line
+                    console.print(get_auth_error_message(source, cookie_file, response))
+                    return None
+
+                response.raise_for_status()
+                content = json.loads(response.text)
+                return {
+                    "content": content,
+                    "filename": os.path.basename(urlparse(source).path),
+                }
         except requests.RequestException as e:
             print(f"Error fetching the manifest: {e}")
             return None
