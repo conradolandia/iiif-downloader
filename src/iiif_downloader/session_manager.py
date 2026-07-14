@@ -2,7 +2,6 @@
 
 import http.cookiejar
 import os
-from pathlib import Path
 from typing import Any
 
 import requests
@@ -13,16 +12,26 @@ from iiif_downloader.download_helpers import get_default_headers
 
 
 class SessionManager:
-    """Manages HTTP sessions with cookie persistence and retry logic."""
+    """Manages HTTP sessions with cookie loading and retry logic.
+
+    Cookie files passed via ``--cookies`` are treated as read-only so a failed
+    request cannot overwrite a browser-exported jar.
+    """
 
     def __init__(self, cookie_file: str | None = None):
         """Initialize the session manager.
 
         Args:
-            cookie_file: Optional path to a cookie file for persistence
+            cookie_file: Optional path to a Netscape/Mozilla cookie file to load
+
+        Raises:
+            FileNotFoundError: If cookie_file is set but does not exist
+            OSError: If the cookie file cannot be read
+            http.cookiejar.LoadError: If the cookie file format is invalid
         """
         self.cookie_file = cookie_file
         self.session = requests.Session()
+        self.cookies_loaded = 0
 
         # Set default headers
         self.session.headers.update(get_default_headers())
@@ -38,42 +47,27 @@ class SessionManager:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
 
-        # Load cookies if file exists
-        if cookie_file and os.path.exists(cookie_file):
+        if cookie_file:
+            if not os.path.exists(cookie_file):
+                raise FileNotFoundError(f"Cookie file not found: {cookie_file}")
             self._load_cookies()
 
     def _load_cookies(self) -> None:
-        """Load cookies from file."""
+        """Load cookies from a Netscape/Mozilla cookie file into the session.
+
+        The file is never modified. Load errors are raised so callers see why
+        credentials were not applied.
+        """
         if not self.cookie_file:
             return
 
-        try:
-            # Use MozillaCookieJar for compatibility
-            jar = http.cookiejar.MozillaCookieJar(self.cookie_file)
-            jar.load(ignore_discard=True, ignore_expires=False)
-            self.session.cookies.update(jar)
-        except Exception:
-            # If loading fails, continue without cookies
-            pass
-
-    def _save_cookies(self) -> None:
-        """Save cookies to file."""
-        if not self.cookie_file:
-            return
-
-        try:
-            # Ensure directory exists
-            cookie_path = Path(self.cookie_file)
-            cookie_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Save cookies using MozillaCookieJar format
-            jar = http.cookiejar.MozillaCookieJar(self.cookie_file)
-            for cookie in self.session.cookies:
-                jar.set_cookie(cookie)
-            jar.save(ignore_discard=True, ignore_expires=False)
-        except Exception:
-            # If saving fails, continue without saving
-            pass
+        jar = http.cookiejar.MozillaCookieJar(self.cookie_file)
+        # Keep expired cookies: Cloudflare clearance can look expired to cookielib
+        # depending on clock skew / export format, and ignore_expires still
+        # loads them for sending.
+        jar.load(ignore_discard=True, ignore_expires=True)
+        self.session.cookies.update(jar)
+        self.cookies_loaded = len(jar)
 
     def get(self, url: str, **kwargs: Any) -> requests.Response:
         """Make a GET request using the session.
@@ -85,11 +79,7 @@ class SessionManager:
         Returns:
             requests.Response: Response object
         """
-        response = self.session.get(url, **kwargs)
-        # Save cookies after each request
-        if self.cookie_file:
-            self._save_cookies()
-        return response
+        return self.session.get(url, **kwargs)
 
     def head(self, url: str, **kwargs: Any) -> requests.Response:
         """Make a HEAD request using the session.
@@ -101,22 +91,21 @@ class SessionManager:
         Returns:
             requests.Response: Response object
         """
-        response = self.session.head(url, **kwargs)
-        # Save cookies after each request
-        if self.cookie_file:
-            self._save_cookies()
-        return response
+        return self.session.head(url, **kwargs)
 
     def close(self) -> None:
-        """Close the session and save cookies."""
-        if self.cookie_file:
-            self._save_cookies()
+        """Close the session without writing the cookie file."""
         self.session.close()
 
-    def __enter__(self):
+    def __enter__(self) -> "SessionManager":
         """Context manager entry."""
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         """Context manager exit."""
         self.close()

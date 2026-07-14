@@ -49,7 +49,10 @@ def main():
     )
     parser.add_argument(
         "--cookies",
-        help="Path to a cookie file for session persistence (useful for servers with bot protection)",
+        help=(
+            "Path to a Netscape/Mozilla cookie file (read-only; useful for "
+            "servers with bot protection)"
+        ),
     )
 
     args = parser.parse_args()

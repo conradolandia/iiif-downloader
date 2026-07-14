@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 import requests
 from rich.console import Console
@@ -11,7 +12,51 @@ from .auth_detector import (
     is_authentication_required,
     is_recaptcha_page,
 )
-from .constants import JSON_CONTENT_TYPES
+from .constants import (
+    DOWNLOAD_RETRY_BACKOFF_SECONDS,
+    JSON_CONTENT_TYPES,
+    MAX_DOWNLOAD_RETRIES,
+    MIN_VALID_IMAGE_BYTES,
+)
+
+
+def remove_incomplete_file(filename: str) -> None:
+    """Remove a partial or empty download target if it exists.
+
+    Args:
+        filename: Path to the file that may be incomplete
+    """
+    try:
+        if os.path.exists(filename):
+            os.remove(filename)
+    except OSError:
+        pass
+
+
+def is_download_complete(
+    downloaded_bytes: int, content_length: int | None
+) -> tuple[bool, str | None]:
+    """Check whether a downloaded file looks complete.
+
+    Args:
+        downloaded_bytes: Number of bytes written
+        content_length: Expected size from Content-Length, if known
+
+    Returns:
+        tuple: (is_complete, reason_if_incomplete)
+    """
+    if downloaded_bytes < MIN_VALID_IMAGE_BYTES:
+        return False, (
+            f"downloaded only {downloaded_bytes} bytes "
+            f"(minimum {MIN_VALID_IMAGE_BYTES})"
+        )
+
+    if content_length is not None and downloaded_bytes < content_length:
+        return False, (
+            f"truncated download: got {downloaded_bytes:,} of {content_length:,} bytes"
+        )
+
+    return True, None
 
 
 def estimate_file_size_from_dimensions(
@@ -163,8 +208,9 @@ def download_image_stream(
     task=None,
     verbose=False,
     image_info=None,
+    max_retries: int = MAX_DOWNLOAD_RETRIES,
 ):
-    """Download an image with streaming and progress tracking.
+    """Download an image with streaming, validation, and retries.
 
     Args:
         service_id: Image service ID
@@ -176,6 +222,7 @@ def download_image_stream(
         task: Progress task ID (optional)
         verbose: Whether to print verbose output
         image_info: Image info dict with width/height for size estimation (optional)
+        max_retries: Number of attempts for empty/truncated/network failures
 
     Returns:
         tuple: (success: bool, final_filename: str, downloaded_bytes: int, chunk_count: int)
@@ -196,10 +243,12 @@ def download_image_stream(
 
     # Try to get Content-Length from HEAD request first
     estimated_size = None
-    content_length = get_content_length_from_head(image_url, session_manager, timeout)
+    head_content_length = get_content_length_from_head(
+        image_url, session_manager, timeout
+    )
 
     # If HEAD request didn't provide Content-Length, try to estimate from image info
-    if content_length is None and image_info:
+    if head_content_length is None and image_info:
         width = image_info.get("width")
         height = image_info.get("height")
         if width and height:
@@ -221,6 +270,78 @@ def download_image_stream(
                     f"({estimated_size / 1024 / 1024:.1f} MB)[/dim]"
                 )
 
+    last_filename = filename
+    last_downloaded_bytes = 0
+    last_chunk_count = 0
+
+    for attempt in range(1, max_retries + 1):
+        if progress and task is not None:
+            progress.update(task, completed=0)
+
+        (
+            success,
+            last_filename,
+            last_downloaded_bytes,
+            last_chunk_count,
+            retryable,
+            failure_reason,
+        ) = _download_image_stream_once(
+            image_url=image_url,
+            filename=last_filename,
+            session_manager=session_manager,
+            server_capabilities=server_capabilities,
+            progress=progress,
+            task=task,
+            verbose=verbose,
+            timeout=timeout,
+            estimated_size=estimated_size,
+            head_content_length=head_content_length,
+            image_size=image_size,
+            service_id=service_id,
+            console=console,
+        )
+
+        if success:
+            return True, last_filename, last_downloaded_bytes, last_chunk_count
+
+        if not retryable:
+            return False, last_filename, last_downloaded_bytes, last_chunk_count
+
+        if attempt < max_retries:
+            delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+            reason = failure_reason or "download failed"
+            console.print(
+                f"[yellow]Incomplete download ({reason}). "
+                f"Retrying in {delay:.0f}s ({attempt}/{max_retries})...[/yellow]"
+            )
+            time.sleep(delay)
+
+    return False, last_filename, last_downloaded_bytes, last_chunk_count
+
+
+def _download_image_stream_once(
+    image_url: str,
+    filename: str,
+    session_manager,
+    server_capabilities,
+    progress,
+    task,
+    verbose: bool,
+    timeout: tuple[int, int],
+    estimated_size: int | None,
+    head_content_length: int | None,
+    image_size,
+    service_id: str,
+    console: Console,
+) -> tuple[bool, str, int, int, bool, str | None]:
+    """Perform a single streaming download attempt.
+
+    Returns:
+        tuple: (success, filename, downloaded_bytes, chunk_count, retryable, failure_reason)
+    """
+    content_length = head_content_length
+    expected_bytes: int | None = None
+
     try:
         response = session_manager.get(image_url, stream=True, timeout=timeout)
 
@@ -230,14 +351,14 @@ def download_image_stream(
                 image_url, session_manager.cookie_file, response
             )
             console.print(error_msg)
-            return False, filename, 0, 0
+            return False, filename, 0, 0, False, "authentication required"
 
         # If format fails and we haven't probed, try fallback
         if not server_capabilities and response.status_code in (400, 404, 415):
             image_format = "jpg"
             image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
             # Update filename to match format
-            base, ext = os.path.splitext(filename)
+            base, _ext = os.path.splitext(filename)
             filename = f"{base}.{image_format}"
             if verbose:
                 console.print(f"[dim]Format fallback, retrying with: {image_url}[/dim]")
@@ -249,7 +370,7 @@ def download_image_stream(
                     image_url, session_manager.cookie_file, response
                 )
                 console.print(error_msg)
-                return False, filename, 0, 0
+                return False, filename, 0, 0, False, "authentication required"
 
         response.raise_for_status()
 
@@ -266,7 +387,7 @@ def download_image_stream(
                     f"[red]Error:[/red] Server returned HTML instead of image. "
                     f"Content-Type: {content_type}"
                 )
-            return False, filename, 0, 0
+            return False, filename, 0, 0, False, "html response"
 
         if verbose:
             console.print(
@@ -279,7 +400,8 @@ def download_image_stream(
         content_length_from_response = response.headers.get("content-length")
         if content_length_from_response:
             content_length = int(content_length_from_response)
-        # If still no content length, use estimated size
+            expected_bytes = content_length
+        # If still no content length, use estimated size for progress only
         elif estimated_size:
             content_length = estimated_size
         else:
@@ -311,7 +433,7 @@ def download_image_stream(
 
         # Adaptive estimation: refine estimate as we download
         adaptive_estimate = content_length
-        samples_for_estimation = []
+        samples_for_estimation: list[int] = []
         min_samples_for_estimate = 5  # Need at least 5 chunks to estimate
 
         try:
@@ -323,13 +445,13 @@ def download_image_stream(
                         chunk_count += 1
 
                         # Collect samples for adaptive estimation
-                        if not content_length and chunk_count <= 20:
+                        if not content_length_from_response and chunk_count <= 20:
                             samples_for_estimation.append(len(chunk))
 
                         # Adaptive estimation: if we don't have a reliable size,
                         # estimate based on average chunk size and download rate
                         if (
-                            not content_length
+                            not content_length_from_response
                             and chunk_count >= min_samples_for_estimate
                             and len(samples_for_estimation) >= min_samples_for_estimate
                         ):
@@ -411,35 +533,23 @@ def download_image_stream(
             if verbose:
                 console.print(f"[dim]Stream ended after {chunk_count} chunks[/dim]")
 
+            file_size = (
+                os.path.getsize(filename)
+                if os.path.exists(filename)
+                else downloaded_bytes
+            )
             if verbose:
-                file_size = os.path.getsize(filename)
                 console.print(
                     f"[dim]Download complete: {file_size} bytes written "
                     f"({chunk_count} chunks)[/dim]"
                 )
-                # Check if actual size matches estimate
-                if content_length and file_size != content_length:
-                    if verbose:
-                        # Only warn if the difference is significant (>5%)
-                        difference = abs(file_size - content_length)
-                        if difference > content_length * 0.05:
-                            console.print(
-                                f"[yellow]Warning: File size ({file_size:,}) doesn't match "
-                                f"Content-Length ({content_length:,})[/yellow]"
-                            )
-                elif adaptive_estimate and file_size != adaptive_estimate:
-                    if verbose:
-                        # Show how close our estimate was
-                        difference_pct = (
-                            abs(file_size - adaptive_estimate) / file_size * 100
-                        )
-                        if difference_pct > 20:  # More than 20% off
-                            console.print(
-                                f"[dim]Actual size ({file_size:,}) differs from estimate "
-                                f"({adaptive_estimate:,}) by {difference_pct:.1f}%[/dim]"
-                            )
 
-            return True, filename, downloaded_bytes, chunk_count
+            complete, reason = is_download_complete(file_size, expected_bytes)
+            if not complete:
+                remove_incomplete_file(filename)
+                return False, filename, file_size, chunk_count, True, reason
+
+            return True, filename, downloaded_bytes, chunk_count, False, None
 
         finally:
             # Explicitly close the connection
@@ -448,6 +558,12 @@ def download_image_stream(
                 console.print("[dim]Connection closed[/dim]")
 
     except requests.RequestException as e:
+        remove_incomplete_file(filename)
         if verbose:
             console.print(f"[red]Error downloading image:[/red] {e}")
-        return False, filename, 0, 0
+        return False, filename, 0, 0, True, str(e)
+    except OSError as e:
+        remove_incomplete_file(filename)
+        if verbose:
+            console.print(f"[red]Error writing image:[/red] {e}")
+        return False, filename, 0, 0, True, str(e)

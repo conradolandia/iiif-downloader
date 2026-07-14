@@ -4,6 +4,8 @@ import json
 import os
 from typing import Any
 
+from iiif_downloader.constants import MIN_VALID_IMAGE_BYTES
+
 
 class FileTracker:
     """Tracks downloaded files using a manifest file and set-based lookups."""
@@ -78,7 +80,41 @@ class FileTracker:
 
         return filenames
 
-    def _load_state(self):
+    def _is_valid_image_file(self, filename: str) -> bool:
+        """Return True if filename exists and is large enough to be a real image.
+
+        Args:
+            filename: Path to check
+
+        Returns:
+            bool: True if the file looks complete
+        """
+        try:
+            return (
+                os.path.exists(filename)
+                and os.path.getsize(filename) >= MIN_VALID_IMAGE_BYTES
+            )
+        except OSError:
+            return False
+
+    def _remove_incomplete_file(self, filename: str) -> bool:
+        """Remove an empty/tiny leftover download file.
+
+        Args:
+            filename: Path to remove if incomplete
+
+        Returns:
+            bool: True if a file was removed
+        """
+        try:
+            if os.path.exists(filename) and not self._is_valid_image_file(filename):
+                os.remove(filename)
+                return True
+        except OSError:
+            pass
+        return False
+
+    def _load_state(self) -> None:
         """Load existing state from manifest file and scan directory."""
         # Load from manifest file if it exists
         if os.path.exists(self.manifest_file):
@@ -92,15 +128,27 @@ class FileTracker:
 
         # Scan directory for existing files and update state
         # Check both label-based and numeric naming for backward compatibility
+        valid_indices: set[int] = set()
         for idx in range(self.total_images):
             possible_filenames = self._get_filename_for_index(idx)
-            if any(os.path.exists(fname) for fname in possible_filenames):
-                self.downloaded_indices.add(idx)
+            found_valid = False
+            for fname in possible_filenames:
+                if self._is_valid_image_file(fname):
+                    found_valid = True
+                elif self._remove_incomplete_file(fname):
+                    print(
+                        f"Warning: Removed incomplete download "
+                        f"({os.path.basename(fname)})"
+                    )
+            if found_valid:
+                valid_indices.add(idx)
+
+        self.downloaded_indices = valid_indices
 
         # Save updated state
         self._save_state()
 
-    def _save_state(self):
+    def _save_state(self) -> None:
         """Save current state to manifest file."""
         state = {
             "downloaded_indices": list(self.downloaded_indices),
@@ -138,7 +186,7 @@ class FileTracker:
         """
         possible_filenames = self._get_filename_for_index(index)
         for filename in possible_filenames:
-            if os.path.exists(filename):
+            if self._is_valid_image_file(filename):
                 return filename
         return None
 
@@ -180,7 +228,7 @@ class FileTracker:
                     pass
         return False
 
-    def mark_downloaded(self, index: int):
+    def mark_downloaded(self, index: int) -> None:
         """Mark an image as downloaded.
 
         Args:

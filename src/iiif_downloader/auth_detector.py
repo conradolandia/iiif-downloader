@@ -154,7 +154,10 @@ def get_auth_error_message(
         message += "4. Save cookies to a file (Netscape/Mozilla format)\n"
         message += "5. Run the downloader with: --cookies /path/to/cookies.txt\n\n"
 
-    message += "[dim]Note: Cookies are used for both manifest fetch and image downloads[/dim]\n"
+    message += (
+        "[dim]Note: --cookies is read-only (your export file is not overwritten). "
+        "Cookies are used for both manifest fetch and image downloads.[/dim]\n"
+    )
     message += "=" * 70 + "\n"
 
     return message

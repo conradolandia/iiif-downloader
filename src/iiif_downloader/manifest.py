@@ -1,5 +1,6 @@
 """Manifest loading and parsing functionality."""
 
+import http.cookiejar
 import json
 import os
 from typing import Any
@@ -438,6 +439,10 @@ def load_manifest(source: str, cookie_file: str | None = None) -> dict[str, Any]
                     "content": content,
                     "filename": os.path.basename(urlparse(source).path),
                 }
+        except (FileNotFoundError, OSError, http.cookiejar.LoadError) as e:
+            print()
+            print(f"Error loading cookie file: {e}")
+            return None
         except requests.RequestException as e:
             print(f"Error fetching the manifest: {e}")
             return None
