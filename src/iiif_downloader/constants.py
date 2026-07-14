@@ -12,7 +12,7 @@ JSON_CONTENT_TYPES = [
 ]
 
 # Treat files smaller than this as incomplete (empty/corrupt leftovers)
-MIN_VALID_IMAGE_BYTES = 1024
+MIN_VALID_IMAGE_BYTES = 1024 * 16  # 16 KB
 
 # Retry empty/truncated/failed image downloads
 MAX_DOWNLOAD_RETRIES = 3
