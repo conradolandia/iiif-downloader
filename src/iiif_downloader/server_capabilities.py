@@ -8,6 +8,11 @@ from urllib.parse import urlparse
 
 import requests
 
+# Fields that depend on a specific image and must not be reused from domain cache
+_IMAGE_SPECIFIC_CACHE_KEYS = frozenset(
+    {"max_test_size", "supports_full_size", "max_edge"}
+)
+
 
 @dataclass
 class ServerCapabilities:
@@ -15,7 +20,8 @@ class ServerCapabilities:
 
     preferred_format: str  # "jpeg" or "jpg"
     supports_full_size: bool
-    max_test_size: int | None = None  # Maximum size that worked in testing
+    max_test_size: int | None = None  # Maximum width that worked for the probed image
+    max_edge: int | None = None  # Max resulting edge (W or H) from probing
     supported_qualities: list[str] = field(default_factory=lambda: ["default"])
     requires_authentication: bool = False  # Whether authentication is required
     rate_limit_detected: bool = False  # Whether rate limiting is detected
@@ -32,13 +38,22 @@ def _get_cache_path(server_domain: str) -> Path:
 
 
 def _load_cached_capabilities(server_domain: str) -> ServerCapabilities | None:
-    """Load cached capabilities for a server domain."""
+    """Load cached domain-level capabilities (format, auth, qualities only).
+
+    Image-specific fields (max size / edge) are stripped so they are always
+    re-probed for the current image.
+    """
     cache_path = _get_cache_path(server_domain)
     if cache_path.exists():
         try:
             with open(cache_path) as f:
                 data = json.load(f)
-            # Reconstruct ServerCapabilities from dict
+            for key in _IMAGE_SPECIFIC_CACHE_KEYS:
+                data.pop(key, None)
+            # Reconstruct with safe defaults for image-specific fields
+            data.setdefault("supports_full_size", False)
+            data.setdefault("max_test_size", None)
+            data.setdefault("max_edge", None)
             return ServerCapabilities(**data)
         except (json.JSONDecodeError, KeyError, TypeError):
             return None
@@ -48,18 +63,19 @@ def _load_cached_capabilities(server_domain: str) -> ServerCapabilities | None:
 def _save_cached_capabilities(
     server_domain: str, capabilities: ServerCapabilities
 ) -> None:
-    """Save capabilities to cache."""
+    """Save domain-level capabilities to cache (excludes per-image size limits)."""
     cache_path = _get_cache_path(server_domain)
     try:
-        # Convert dataclass to dict for JSON serialization
         data = {
             "preferred_format": capabilities.preferred_format,
-            "supports_full_size": capabilities.supports_full_size,
-            "max_test_size": capabilities.max_test_size,
             "supported_qualities": capabilities.supported_qualities,
             "requires_authentication": capabilities.requires_authentication,
             "rate_limit_detected": capabilities.rate_limit_detected,
             "server_domain": capabilities.server_domain,
+            # Kept for backward-compatible cache readers; always re-probed
+            "supports_full_size": False,
+            "max_test_size": None,
+            "max_edge": None,
         }
         with open(cache_path, "w") as f:
             json.dump(data, f, indent=2)
@@ -67,39 +83,88 @@ def _save_cached_capabilities(
         pass  # Silently fail if cache write fails
 
 
+def _size_request_ok(
+    service_id: str, format_str: str, size: int, session_manager
+) -> bool:
+    """Return True if a HEAD request for the given width succeeds."""
+    test_url = f"{service_id}/full/{size},/0/default.{format_str}"
+    try:
+        response = session_manager.head(test_url, timeout=5)
+        return response.status_code == 200
+    except requests.RequestException:
+        return False
+
+
 def _test_format(service_id: str, test_size: int, session_manager) -> tuple[str, bool]:
     """Test format support and return (format, success)."""
     for format_option in ["jpeg", "jpg"]:
-        test_url = f"{service_id}/full/{test_size},/0/default.{format_option}"
-        try:
-            response = session_manager.head(test_url, timeout=5)
-            if response.status_code == 200:
-                return format_option, True
-        except requests.RequestException:
-            continue
+        if _size_request_ok(service_id, format_option, test_size, session_manager):
+            return format_option, True
     return "jpg", False  # Default fallback
 
 
-def _test_maximum_size(
-    service_id: str, format_str: str, start_size: int, session_manager
+def _find_working_size(
+    service_id: str, format_str: str, hi: int, session_manager
 ) -> int | None:
-    """Test progressively larger sizes to find maximum supported."""
-    # Test sizes: start_size, 5000, 10000, full if available
-    test_sizes = [start_size, 5000, 10000]
+    """Find a width that works, at or below ``hi``."""
+    candidates = []
+    for size in (hi, 500, 256, 128, 64, 1):
+        if 1 <= size <= hi and size not in candidates:
+            candidates.append(size)
 
-    max_working_size = None
-    for test_size in test_sizes:
-        test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
-        try:
-            response = session_manager.head(test_url, timeout=5)
-            if response.status_code == 200:
-                max_working_size = test_size
-            else:
-                break  # Stop testing larger sizes if current fails
-        except requests.RequestException:
-            break
+    for size in candidates:
+        if _size_request_ok(service_id, format_str, size, session_manager):
+            return size
+    return None
 
-    return max_working_size
+
+def _test_maximum_size(
+    service_id: str,
+    format_str: str,
+    desired_size: int,
+    session_manager,
+    upper_bound: int | None = None,
+) -> int | None:
+    """Binary-search the maximum supported request width.
+
+    Args:
+        service_id: Image service base URL
+        format_str: Image format extension (jpg/jpeg)
+        desired_size: Target width to try (inclusive upper goal)
+        session_manager: Session manager for HTTP requests
+        upper_bound: Optional hard cap (e.g. declared maxWidth)
+
+    Returns:
+        int | None: Largest working width, or None if no size works
+    """
+    hi = desired_size
+    if upper_bound is not None:
+        hi = min(hi, upper_bound)
+    if hi < 1:
+        return None
+
+    if _size_request_ok(service_id, format_str, hi, session_manager):
+        return hi
+
+    lo = _find_working_size(service_id, format_str, hi, session_manager)
+    if lo is None:
+        return None
+    if lo >= hi:
+        return lo
+
+    # lo works, hi does not: binary search the open interval (lo, hi)
+    left = lo
+    right = hi - 1
+    best = lo
+    while left <= right:
+        mid = (left + right) // 2
+        if _size_request_ok(service_id, format_str, mid, session_manager):
+            best = mid
+            left = mid + 1
+        else:
+            right = mid - 1
+
+    return best
 
 
 def _test_quality_levels(
@@ -165,16 +230,47 @@ def _test_rate_limiting(
     return False
 
 
+def _derive_max_edge(
+    max_width: int, image_width: int | None, image_height: int | None
+) -> int:
+    """Derive the maximum allowed edge length from a probed width.
+
+    Args:
+        max_width: Maximum requestable width found by probing
+        image_width: Full width of the probed image
+        image_height: Full height of the probed image
+
+    Returns:
+        int: Maximum of probed width and resulting scaled height
+    """
+    if image_width and image_height and image_width > 0:
+        resulting_height = int(max_width * image_height / image_width)
+        return max(max_width, resulting_height)
+    return max_width
+
+
 def probe_server_capabilities(
-    service_id: str, sample_image_size: int, session_manager, use_cache: bool = True
+    service_id: str,
+    sample_image_size: int,
+    session_manager,
+    use_cache: bool = True,
+    upper_bound: int | None = None,
+    image_width: int | None = None,
+    image_height: int | None = None,
 ) -> ServerCapabilities:
     """Probe server capabilities by testing a sample image request.
+
+    Domain-level results (format, qualities, auth) may be cached. Per-image
+    size limits are always probed for the current sample.
 
     Args:
         service_id: The image service ID (from image info)
         sample_image_size: The size to test (width in pixels)
         session_manager: SessionManager instance for making requests
-        use_cache: Whether to use cached capabilities if available
+        use_cache: Whether to use cached domain capabilities if available
+        upper_bound: Optional hard cap for size probing (e.g. declared maxWidth)
+        image_width: Full width of the sample image (for max_edge derivation)
+        image_height: Full height of the sample image (for max_edge derivation)
 
     Returns:
         ServerCapabilities: Discovered server capabilities
@@ -183,58 +279,70 @@ def probe_server_capabilities(
     parsed_url = urlparse(service_id)
     server_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-    # Try to load from cache
+    cached: ServerCapabilities | None = None
     if use_cache:
         cached = _load_cached_capabilities(server_domain)
-        if cached:
-            cached.server_domain = server_domain  # Ensure domain is set
-            return cached
 
-    # Test format support
-    format_to_test, format_works = _test_format(
-        service_id, sample_image_size, session_manager
-    )
+    format_probe_size = min(500, max(1, sample_image_size))
+    if cached is not None and cached.preferred_format:
+        format_to_test = cached.preferred_format
+        format_works = _size_request_ok(
+            service_id, format_to_test, format_probe_size, session_manager
+        )
+        if not format_works:
+            format_to_test, format_works = _test_format(
+                service_id, format_probe_size, session_manager
+            )
+    else:
+        format_to_test, format_works = _test_format(
+            service_id, format_probe_size, session_manager
+        )
 
-    # If format doesn't work at requested size, try smaller size
-    test_size = sample_image_size
     if not format_works:
-        format_to_test, _ = _test_format(service_id, 500, session_manager)
-        test_size = 500
+        format_to_test = "jpg"
 
-    # Test maximum supported size
+    # Always probe maximum supported size for this image
     max_size = _test_maximum_size(
-        service_id, format_to_test, test_size, session_manager
+        service_id,
+        format_to_test,
+        sample_image_size,
+        session_manager,
+        upper_bound=upper_bound,
     )
 
-    # Determine if server supports the requested full size
     supports_full_size = max_size is not None and max_size >= sample_image_size
-
-    # Test quality levels
-    supported_qualities = _test_quality_levels(
-        service_id, format_to_test, test_size, session_manager
+    max_edge = (
+        _derive_max_edge(max_size, image_width, image_height) if max_size else None
     )
+    quality_test_size = max_size or format_probe_size
 
-    # Test authentication
-    requires_auth = _test_authentication(
-        service_id, format_to_test, test_size, session_manager
-    )
-
-    # Test rate limiting
-    rate_limit_detected = _test_rate_limiting(
-        service_id, format_to_test, test_size, session_manager
-    )
+    if cached is not None:
+        supported_qualities = cached.supported_qualities or ["default"]
+        requires_auth = cached.requires_authentication
+        rate_limit_detected = cached.rate_limit_detected
+    else:
+        supported_qualities = _test_quality_levels(
+            service_id, format_to_test, quality_test_size, session_manager
+        )
+        requires_auth = _test_authentication(
+            service_id, format_to_test, quality_test_size, session_manager
+        )
+        rate_limit_detected = _test_rate_limiting(
+            service_id, format_to_test, quality_test_size, session_manager
+        )
 
     capabilities = ServerCapabilities(
         preferred_format=format_to_test,
         supports_full_size=supports_full_size,
         max_test_size=max_size,
+        max_edge=max_edge,
         supported_qualities=supported_qualities,
         requires_authentication=requires_auth,
         rate_limit_detected=rate_limit_detected,
         server_domain=server_domain,
     )
 
-    # Cache the capabilities
+    # Cache domain-level capabilities only
     if use_cache:
         _save_cached_capabilities(server_domain, capabilities)
 

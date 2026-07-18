@@ -2,7 +2,9 @@
 
 import http.cookiejar
 import json
+import math
 import os
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,6 +16,24 @@ from iiif_downloader.auth_detector import (
     is_authentication_required,
 )
 from iiif_downloader.session_manager import SessionManager
+
+
+@dataclass(frozen=True)
+class ImageSizeLimits:
+    """Maximum size constraints declared by an IIIF Image API service."""
+
+    max_width: int | None = None
+    max_height: int | None = None
+    max_area: int | None = None
+
+    @property
+    def has_limits(self) -> bool:
+        """Return True if any size constraint is set."""
+        return (
+            self.max_width is not None
+            or self.max_height is not None
+            or self.max_area is not None
+        )
 
 
 def detect_manifest_version(manifest_content):
@@ -248,7 +268,7 @@ def get_image_info_from_canvas_resource(
     return None
 
 
-def get_image_service_id_from_info(image_info):
+def get_image_service_id_from_info(image_info: dict[str, Any]) -> str | None:
     """Extract the image service ID from image info, handling both v2 and v3 formats.
 
     Args:
@@ -261,43 +281,160 @@ def get_image_service_id_from_info(image_info):
     return image_info.get("id") or image_info.get("@id")
 
 
-def get_image_size_from_info(image_info, requested_size=None):
+def get_size_limits_from_info(image_info: dict[str, Any]) -> ImageSizeLimits:
+    """Extract maxWidth, maxHeight, and maxArea from IIIF image info.
+
+    Image API 3.0 declares these at the top level. Image API 2.x may nest them
+    in a profile description object inside the profile array.
+
+    Args:
+        image_info: The parsed image info JSON response
+
+    Returns:
+        ImageSizeLimits: Declared size constraints (fields may be None)
+    """
+    max_width = image_info.get("maxWidth")
+    max_height = image_info.get("maxHeight")
+    max_area = image_info.get("maxArea")
+
+    profile = image_info.get("profile")
+    profile_objects: list[dict[str, Any]] = []
+    if isinstance(profile, list):
+        profile_objects = [p for p in profile if isinstance(p, dict)]
+    elif isinstance(profile, dict):
+        profile_objects = [profile]
+
+    for item in profile_objects:
+        if max_width is None and "maxWidth" in item:
+            max_width = item.get("maxWidth")
+        if max_height is None and "maxHeight" in item:
+            max_height = item.get("maxHeight")
+        if max_area is None and "maxArea" in item:
+            max_area = item.get("maxArea")
+
+    def _as_positive_int(value: Any) -> int | None:
+        """Convert a value to a positive int, or None if invalid."""
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    return ImageSizeLimits(
+        max_width=_as_positive_int(max_width),
+        max_height=_as_positive_int(max_height),
+        max_area=_as_positive_int(max_area),
+    )
+
+
+def max_requestable_width(
+    image_width: int,
+    image_height: int,
+    limits: ImageSizeLimits | None = None,
+    max_edge: int | None = None,
+) -> int:
+    """Compute the maximum requestable width for an image under size constraints.
+
+    Applies IIIF maxWidth, maxHeight, and maxArea. When ``max_edge`` is set
+    (from probing), both resulting width and height are capped to that edge.
+
+    Args:
+        image_width: Full image width in pixels
+        image_height: Full image height in pixels
+        limits: Declared service size limits (optional)
+        max_edge: Maximum allowed edge length discovered by probing (optional)
+
+    Returns:
+        int: Maximum requestable width (at least 1)
+    """
+    if image_width <= 0:
+        return 1
+
+    candidates: list[int] = [image_width]
+
+    if limits is not None:
+        if limits.max_width is not None:
+            candidates.append(limits.max_width)
+        if limits.max_height is not None and image_height > 0:
+            candidates.append(int(limits.max_height * image_width / image_height))
+        if limits.max_area is not None and image_height > 0:
+            # width * height_scaled <= max_area
+            # height_scaled = width * image_height / image_width
+            area_cap = int(math.sqrt(limits.max_area * image_width / image_height))
+            candidates.append(max(1, area_cap))
+
+    if max_edge is not None and max_edge > 0:
+        candidates.append(max_edge)
+        if image_height > 0:
+            candidates.append(int(max_edge * image_width / image_height))
+
+    return max(1, min(candidates))
+
+
+def get_image_size_from_info(
+    image_info: dict[str, Any],
+    requested_size: int | None = None,
+    max_edge: int | None = None,
+) -> int | None:
     """Extract the appropriate image size from image info, handling different API versions.
+
+    Honors maxWidth/maxHeight/maxArea from the service and an optional probed
+    max edge so portrait images are not requested wider than the server allows.
 
     Args:
         image_info: The parsed image info JSON response
         requested_size: Specific size requested by user (optional)
+        max_edge: Maximum allowed edge length from server probing (optional)
 
     Returns:
         int: The width to use for the image, or None if no size information available
     """
-    if requested_size:
-        return requested_size
+    full_width = image_info.get("width")
+    full_height = image_info.get("height")
+    target_size: int | None = None
 
-    # Handle different IIIF Image API versions
-    if "sizes" in image_info and "width" in image_info:
+    if requested_size:
+        target_size = requested_size
+    elif "sizes" in image_info and full_width:
         # IIIF Image API 2.x - try to use a reasonable large size
-        # First, get the largest size from the sizes array
         largest_listed = max(image_info["sizes"], key=lambda x: x["width"])["width"]
-        full_width = image_info["width"]
 
         # Try to use a size between the largest listed and full resolution
-        # This gives us better quality while respecting server capabilities
         if full_width > largest_listed:
-            # Use a reasonable intermediate size (e.g., 2500px or 50% of full width)
-            target_size = min(2500, full_width // 2)
-            # But don't go smaller than the largest listed size
-            return max(target_size, largest_listed)
+            # Prefer full width when limits will cap it; otherwise use a
+            # reasonable intermediate size.
+            limits = get_size_limits_from_info(image_info)
+            if limits.has_limits or max_edge is not None:
+                target_size = full_width
+            else:
+                intermediate = min(2500, full_width // 2)
+                target_size = max(intermediate, largest_listed)
         else:
-            return largest_listed
+            target_size = largest_listed
     elif "sizes" in image_info:
         # IIIF Image API 2.x - use the largest available size from sizes array
-        return max(image_info["sizes"], key=lambda x: x["width"])["width"]
-    elif "width" in image_info:
+        target_size = max(image_info["sizes"], key=lambda x: x["width"])["width"]
+    elif full_width:
         # IIIF Image API 1.x or fallback - use full width
-        return image_info["width"]
+        target_size = full_width
 
-    return None
+    if target_size is None:
+        return None
+
+    limits = get_size_limits_from_info(image_info)
+    if full_width and full_height:
+        capped = max_requestable_width(
+            int(full_width), int(full_height), limits, max_edge
+        )
+        target_size = min(int(target_size), capped)
+    elif limits.max_width is not None:
+        target_size = min(int(target_size), limits.max_width)
+    elif max_edge is not None:
+        target_size = min(int(target_size), max_edge)
+
+    return max(1, int(target_size))
 
 
 def get_canvas_label(canvas: dict) -> str | None:

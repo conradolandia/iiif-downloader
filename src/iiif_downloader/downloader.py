@@ -24,6 +24,7 @@ from iiif_downloader.manifest import (
     get_image_service_from_canvas,
     get_image_service_id_from_info,
     get_image_size_from_info,
+    get_size_limits_from_info,
 )
 from iiif_downloader.progress_columns import CompletedTotalColumn, FixedWidthTextColumn
 from iiif_downloader.rate_limiter import RateLimiter
@@ -141,8 +142,14 @@ class IIIFDownloader:
             image_size = get_image_size_from_info(info, self.size)
 
             if service_id and image_size:
+                limits = get_size_limits_from_info(info)
                 self.server_capabilities = probe_server_capabilities(
-                    service_id, image_size, self.session_manager
+                    service_id,
+                    image_size,
+                    self.session_manager,
+                    upper_bound=limits.max_width,
+                    image_width=info.get("width"),
+                    image_height=info.get("height"),
                 )
                 self._display_server_capabilities()
 
@@ -162,6 +169,10 @@ class IIIFDownloader:
         if self.server_capabilities.max_test_size:
             self.console.print(
                 f"[dim]  Max tested size: {self.server_capabilities.max_test_size}px[/dim]"
+            )
+        if self.server_capabilities.max_edge:
+            self.console.print(
+                f"[dim]  Max edge: {self.server_capabilities.max_edge}px[/dim]"
             )
         if self.server_capabilities.supported_qualities:
             qualities_str = ", ".join(self.server_capabilities.supported_qualities)
@@ -232,21 +243,16 @@ class IIIFDownloader:
         Returns:
             tuple: (service_id, image_size) or None if error
         """
-        # Determine the size to use
-        image_size = get_image_size_from_info(info, self.size)
+        # Determine the size to use (honors declared limits and probed max edge)
+        max_edge = (
+            self.server_capabilities.max_edge if self.server_capabilities else None
+        )
+        image_size = get_image_size_from_info(info, self.size, max_edge=max_edge)
         if image_size is None:
             self.console.print(
                 f"[bold red]Error: No size information available for image {idx + 1}[/bold red]"
             )
             return None
-
-        # Adjust size if server has a maximum tested size limit
-        if (
-            self.server_capabilities
-            and self.server_capabilities.max_test_size
-            and image_size > self.server_capabilities.max_test_size
-        ):
-            image_size = self.server_capabilities.max_test_size
 
         # Construct the image URL
         service_id = get_image_service_id_from_info(info)
