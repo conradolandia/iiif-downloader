@@ -32,6 +32,9 @@ jobs:
     - name: Run linting and formatting
       run: pixi run check
 
+    - name: Run unit tests
+      run: pixi run test
+
     - name: Test executable build
       run: |
         pixi run build-exe

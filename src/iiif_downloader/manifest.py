@@ -523,8 +523,37 @@ def sanitize_filename(name: str, max_length: int = 200) -> str:
     return sanitized
 
 
+def build_hybrid_filename(
+    label: str | None,
+    idx: int,
+    image_format: str,
+    index_prefix: str = "canvas",
+    fallback_prefix: str = "image",
+) -> str:
+    """Build a hybrid or numeric filename for a page/canvas.
+
+    Args:
+        label: Optional human-readable label.
+        idx: Zero-based index.
+        image_format: Image format extension (e.g., "jpeg", "png").
+        index_prefix: Prefix used with labels (e.g. "canvas", "page").
+        fallback_prefix: Prefix used when no label is available.
+
+    Returns:
+        str: Filename (without path, with extension).
+    """
+    if label:
+        sanitized_label = sanitize_filename(label)
+        return f"{index_prefix}-{idx + 1:03d}_{sanitized_label}.{image_format}"
+    return f"{fallback_prefix}_{idx + 1:03d}.{image_format}"
+
+
 def get_filename_from_canvas(
-    canvas: dict, idx: int, image_format: str, fallback_prefix: str = "image"
+    canvas: dict,
+    idx: int,
+    image_format: str,
+    fallback_prefix: str = "image",
+    index_prefix: str = "canvas",
 ) -> str:
     """Generate a filename from a canvas, using hybrid approach with label if available.
 
@@ -533,20 +562,18 @@ def get_filename_from_canvas(
         idx: Zero-based index of the canvas
         image_format: Image format extension (e.g., "jpeg", "png")
         fallback_prefix: Prefix to use if no label is available (default: "image")
+        index_prefix: Prefix used with labels (default: "canvas")
 
     Returns:
         str: Filename (without path, with extension)
     """
-    label = get_canvas_label(canvas)
-
-    if label:
-        # Hybrid approach: canvas index + label
-        # Format: canvas-005_folio003r.jpeg
-        sanitized_label = sanitize_filename(label)
-        return f"canvas-{idx + 1:03d}_{sanitized_label}.{image_format}"
-    else:
-        # Fall back to numeric naming
-        return f"{fallback_prefix}_{idx + 1:03d}.{image_format}"
+    return build_hybrid_filename(
+        label=get_canvas_label(canvas),
+        idx=idx,
+        image_format=image_format,
+        index_prefix=index_prefix,
+        fallback_prefix=fallback_prefix,
+    )
 
 
 def load_manifest(source: str, cookie_file: str | None = None) -> dict[str, Any] | None:

@@ -1,25 +1,40 @@
 """Command-line interface for the IIIF downloader."""
 
+from __future__ import annotations
+
 import argparse
 import sys
 
 from iiif_downloader.downloader import IIIFDownloader
-from iiif_downloader.manifest import load_manifest
-from iiif_downloader.metadata import save_metadata
+from iiif_downloader.metadata import save_source_metadata
+from iiif_downloader.mets_downloader import MetsDownloader
+from iiif_downloader.sources import get_adapter, supported_formats
 
 
-def main():
+def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Download IIIF images from a manifest URL or local file."
+        description=(
+            "Download images from IIIF manifests or METS documents (URL or local file)."
+        )
     )
     parser.add_argument(
-        "--source", required=True, help="URL or file path of the IIIF manifest"
+        "--source",
+        required=True,
+        help="URL or file path of the manifest/document",
     )
-    parser.add_argument("--size", type=int, help="Desired image width (optional)")
+    parser.add_argument(
+        "--format",
+        choices=supported_formats(),
+        default="iiif",
+        help="Source format (default: iiif)",
+    )
+    parser.add_argument("--size", type=int, help="Desired image width (IIIF only)")
     parser.add_argument("--output", help="Output folder for images (optional)")
     parser.add_argument(
-        "--metadata", action="store_true", help="Save manifest metadata to a text file"
+        "--metadata",
+        action="store_true",
+        help="Save source metadata to a text file",
     )
     parser.add_argument(
         "--resume",
@@ -65,34 +80,61 @@ def main():
     else:
         rate_limit = None  # Use adaptive mode
 
+    if args.format == "mets" and args.size is not None:
+        print(
+            "Warning: --size is ignored for METS sources "
+            "(images are downloaded at their published URL)."
+        )
+
     # Add progress feedback for startup
-    print("🔄 Loading manifest...", end="", flush=True)
+    print("🔄 Loading source...", end="", flush=True)
     sys.stdout.flush()
 
-    manifest_data = load_manifest(args.source, cookie_file=args.cookies)
-    if manifest_data:
-        print(" ✅")
+    try:
+        adapter = get_adapter(args.format)
+    except ValueError as exc:
+        print(" ❌")
+        print(f"Error: {exc}")
+        sys.exit(1)
 
-        # Save metadata if requested
-        if args.metadata:
-            save_metadata(manifest_data, args.output)
+    document = adapter.load(args.source, cookie_file=args.cookies)
+    if not document:
+        print(" ❌")
+        sys.exit(1)
 
-        # Download images
+    print(" ✅")
+
+    if args.metadata:
+        save_source_metadata(document, args.output)
+
+    if args.format == "iiif":
         downloader = IIIFDownloader(
-            manifest_data=manifest_data,
+            manifest_data={
+                "content": document.content,
+                "filename": document.filename,
+            },
             size=args.size,
             output_folder=args.output,
             rate_limit=rate_limit,
             verbose=args.verbose,
             cookie_file=args.cookies,
         )
-
-        if args.canvas:
-            print(f"📥 Downloading canvas {args.canvas}...")
-            downloader.download_one(args.canvas)
-        else:
-            print("📥 Starting download...")
-            downloader.download_all(resume=args.resume)
     else:
-        print(" ❌")
-        sys.exit(1)
+        downloader = MetsDownloader(
+            source_document=document,
+            output_folder=args.output,
+            rate_limit=rate_limit,
+            verbose=args.verbose,
+            cookie_file=args.cookies,
+        )
+
+    if args.canvas:
+        print(f"📥 Downloading page {args.canvas}...")
+        downloader.download_one(args.canvas)
+    else:
+        print("📥 Starting download...")
+        downloader.download_all(resume=args.resume)
+
+
+if __name__ == "__main__":
+    main()

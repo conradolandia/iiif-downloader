@@ -3,20 +3,21 @@
 [![CI](https://github.com/conradolandia/iiif-downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/conradolandia/iiif-downloader/actions/workflows/ci.yml)
 [![Release](https://github.com/conradolandia/iiif-downloader/actions/workflows/build-release.yml/badge.svg)](https://github.com/conradolandia/iiif-downloader/actions/workflows/build-release.yml)
 
-A Python tool for downloading images from IIIF (International Image Interoperability Framework) manifests with progress tracking, rate limiting, and resume capabilities.
+A Python tool for downloading images from IIIF (International Image Interoperability Framework) manifests and METS documents, with progress tracking, rate limiting, and resume support.
 
 ## Features
 
 - Download images from IIIF manifests (URL or local file)
+- Download images from METS XML documents via `--format mets`
 - Support for both IIIF Presentation API v2.1 and v3.0
-- Automatic version detection
+- Automatic IIIF version detection
 - Progress tracking with rich terminal output
 - Adaptive rate limiting to be respectful to servers
 - Resume interrupted downloads
-- Extract and save manifest metadata
-- Configurable image sizes
+- Extract and save source metadata
+- Configurable image sizes (IIIF)
 - Download single canvas/page with `--canvas` option
-- Canvas label-based filename generation (e.g., "folio_001r", "folio_001v")
+- Canvas/page label-based filename generation (e.g., "folio_001r", "folio_001v")
 - File size estimation when Content-Length header is missing
 - Automatic filename migration when resuming with old naming scheme
 - Build standalone executables
@@ -56,8 +57,11 @@ iiif-downloader --source "manifest.json"
 # Specify output directory
 iiif-downloader --source "https://example.com/manifest.json" --output "my_images"
 
-# Download with specific image size
-iiif-downloader --source "https://example.com/manifest.json" --size 1024
+# Download from a local METS XML file
+iiif-downloader --format mets --source "document.xml" --output "mets_images"
+
+# Save METS LABEL + MARC record metadata
+iiif-downloader --format mets --source "document.xml" --metadata --output "mets_images"
 ```
 
 ### Advanced Options
@@ -78,6 +82,27 @@ iiif-downloader --source "https://example.com/manifest.json" --no-adaptive-rate
 # Download a single specific canvas/page (1-based index)
 iiif-downloader --source "https://example.com/manifest.json" --canvas 5
 ```
+
+### METS Support
+
+METS downloads use direct image URLs from the first `fileGrp` under `fileSec`. Page order and labels come from the PHYSICAL `structMap` when present.
+
+```bash
+iiif-downloader \
+  --format mets \
+  --source "BRM20090000711_1.xml" \
+  --output "liber_commicus" \
+  --metadata \
+  --resume
+```
+
+Notes:
+
+- Default `--format` is `iiif`. Pass `--format mets` explicitly (no auto-detection).
+- `--size` is ignored for METS (images are fetched at the published `FLocat` URL).
+- `--canvas` selects a 1-based page index from the structMap order.
+- Filenames use `page-007_1r.jpeg` when a structMap `LABEL` exists.
+- `--metadata` writes the METS `@LABEL` and MARC `record` fields from `dmdSec`.
 
 ### Rate Limiting
 
@@ -172,8 +197,13 @@ iiif-downloader/
 │   ├── __init__.py
 │   ├── __main__.py              # CLI entry point
 │   ├── cli.py                   # Argument parsing
-│   ├── downloader.py            # IIIFDownloader class (core logic)
-│   ├── manifest.py              # Manifest loading/parsing, label extraction
+│   ├── downloader.py            # IIIFDownloader class
+│   ├── mets_downloader.py       # MetsDownloader class
+│   ├── sources/                 # Pluggable source adapters
+│   │   ├── base.py              # PageItem / SourceDocument / protocol
+│   │   ├── iiif.py              # IIIF adapter
+│   │   └── mets.py              # METS adapter
+│   ├── manifest.py              # IIIF manifest loading/parsing
 │   ├── metadata.py              # Metadata extraction
 │   ├── image_downloader.py      # Image downloading with size estimation
 │   ├── rate_limiter.py          # Rate limiting logic
@@ -181,6 +211,9 @@ iiif-downloader/
 │   ├── progress_columns.py      # Custom progress bar columns
 │   ├── server_capabilities.py   # Server capability detection
 │   └── download_helpers.py      # Helper functions
+├── tests/
+│   ├── fixtures/
+│   └── test_mets.py
 ├── pyproject.toml               # Package configuration
 ├── pixi.toml                    # Pixi configuration
 └── iiif-downloader.spec         # PyInstaller spec
@@ -189,12 +222,21 @@ iiif-downloader/
 ### Running Tests
 
 ```bash
-# Install in development mode
-pixi run install
-
-# Run the downloader
-pixi run run --help
+pixi run test
 ```
+
+## TODO / Known Gaps
+
+Items deferred from the initial METS work; review later as needed:
+
+- Auto-detect source format from content (currently requires `--format`)
+- Multiple `fileGrp` selection (v1 uses the first group only; `USE` filtering for thumbnails/masters)
+- Relative `FLocat` paths and local file resolution
+- Non-MARC descriptive metadata in `dmdSec` (MODS, DC, Digibis/OTHER blocks)
+- METS derivative / size selection when only full-resolution URLs are published
+- Additional source adapters beyond IIIF and METS
+- Package rename to reflect multi-format support
+- Broader adapter coverage in CI (METS live download smoke tests)
 
 ## Examples
 

@@ -198,6 +198,92 @@ def fetch_image_info(image_service_url, session_manager, verbose=False):
         return None
 
 
+def download_url_stream(
+    image_url: str,
+    filename: str,
+    session_manager,
+    progress=None,
+    task=None,
+    verbose: bool = False,
+    max_retries: int = MAX_DOWNLOAD_RETRIES,
+) -> tuple[bool, str, int, int]:
+    """Download an image from a direct URL with streaming and retries.
+
+    Used for non-IIIF sources (e.g. METS FLocat URLs) where the image URL
+    is already absolute and size negotiation does not apply.
+
+    Args:
+        image_url: Absolute image URL.
+        filename: Output filename.
+        session_manager: SessionManager instance for making requests.
+        progress: Rich Progress object (optional).
+        task: Progress task ID (optional).
+        verbose: Whether to print verbose output.
+        max_retries: Number of attempts for empty/truncated/network failures.
+
+    Returns:
+        tuple: (success, final_filename, downloaded_bytes, chunk_count)
+    """
+    console = Console()
+    timeout = (30, 60)
+
+    if verbose:
+        console.print(f"[dim]Connecting to: {image_url}[/dim]")
+
+    head_content_length = get_content_length_from_head(
+        image_url, session_manager, timeout
+    )
+
+    last_filename = filename
+    last_downloaded_bytes = 0
+    last_chunk_count = 0
+
+    for attempt in range(1, max_retries + 1):
+        if progress and task is not None:
+            progress.update(task, completed=0)
+
+        (
+            success,
+            last_filename,
+            last_downloaded_bytes,
+            last_chunk_count,
+            retryable,
+            failure_reason,
+        ) = _download_image_stream_once(
+            image_url=image_url,
+            filename=last_filename,
+            session_manager=session_manager,
+            server_capabilities=None,
+            progress=progress,
+            task=task,
+            verbose=verbose,
+            timeout=timeout,
+            estimated_size=None,
+            head_content_length=head_content_length,
+            image_size=None,
+            service_id="",
+            console=console,
+            allow_iiif_format_fallback=False,
+        )
+
+        if success:
+            return True, last_filename, last_downloaded_bytes, last_chunk_count
+
+        if not retryable:
+            return False, last_filename, last_downloaded_bytes, last_chunk_count
+
+        if attempt < max_retries:
+            delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+            reason = failure_reason or "download failed"
+            console.print(
+                f"[yellow]Incomplete download ({reason}). "
+                f"Retrying in {delay:.0f}s ({attempt}/{max_retries})...[/yellow]"
+            )
+            time.sleep(delay)
+
+    return False, last_filename, last_downloaded_bytes, last_chunk_count
+
+
 def download_image_stream(
     service_id,
     image_size,
@@ -299,6 +385,7 @@ def download_image_stream(
             image_size=image_size,
             service_id=service_id,
             console=console,
+            allow_iiif_format_fallback=True,
         )
 
         if success:
@@ -333,6 +420,7 @@ def _download_image_stream_once(
     image_size,
     service_id: str,
     console: Console,
+    allow_iiif_format_fallback: bool = True,
 ) -> tuple[bool, str, int, int, bool, str | None]:
     """Perform a single streaming download attempt.
 
@@ -353,8 +441,14 @@ def _download_image_stream_once(
             console.print(error_msg)
             return False, filename, 0, 0, False, "authentication required"
 
-        # If format fails and we haven't probed, try fallback
-        if not server_capabilities and response.status_code in (400, 404, 415):
+        # If format fails and we haven't probed, try fallback (IIIF only)
+        if (
+            allow_iiif_format_fallback
+            and not server_capabilities
+            and response.status_code in (400, 404, 415)
+            and service_id
+            and image_size is not None
+        ):
             image_format = "jpg"
             image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
             # Update filename to match format
@@ -373,7 +467,6 @@ def _download_image_stream_once(
                 return False, filename, 0, 0, False, "authentication required"
 
         response.raise_for_status()
-
         # Check if response is actually an image
         content_type = response.headers.get("Content-Type", "").lower()
         if "text/html" in content_type:

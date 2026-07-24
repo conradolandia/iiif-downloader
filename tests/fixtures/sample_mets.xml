@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<mets ID="ID1" OBJID="1000017" LABEL="[Liber commicus] / sample - Objeto digital"
+  PROFILE="http://www.loc.gov/standards/mets/profiles/00000044.xml"
+  xmlns="http://www.loc.gov/METS/"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:marc="http://www.loc.gov/MARC21/slim">
+  <metsHdr CREATEDATE="2026-07-24T19:51:15"/>
+  <dmdSec ID="DM1">
+    <mdWrap MDTYPE="MARC">
+      <xmlData>
+        <collection xmlns="http://www.loc.gov/MARC21/slim">
+          <record>
+            <leader>00000ctm a22000005c 4500</leader>
+            <controlfield tag="001">BRM20090000711</controlfield>
+            <controlfield tag="003">RAH</controlfield>
+            <datafield tag="245" ind1="0" ind2="1">
+              <subfield code="a">[Liber commicus]</subfield>
+              <subfield code="h">Manuscrito</subfield>
+            </datafield>
+            <datafield tag="260" ind1=" " ind2=" ">
+              <subfield code="c">[S. XI, ante 1073]</subfield>
+            </datafield>
+          </record>
+          <record>
+            <leader>00000nxm a22000001n 4500</leader>
+            <controlfield tag="001">BRMF20090000711</controlfield>
+            <datafield tag="852" ind1=" " ind2=" ">
+              <subfield code="a">M-RAH</subfield>
+              <subfield code="j">Cod. 22</subfield>
+            </datafield>
+          </record>
+        </collection>
+      </xmlData>
+    </mdWrap>
+  </dmdSec>
+  <fileSec>
+    <fileGrp ID="FG1">
+      <file ID="FID0" MIMETYPE="image/jpeg" SEQ="1">
+        <FLocat LOCTYPE="URL" xlink:type="simple"
+          xlink:href="https://example.com/images/0.jpg"/>
+      </file>
+      <file ID="FID1" MIMETYPE="image/jpeg" SEQ="2">
+        <FLocat LOCTYPE="URL" xlink:type="simple"
+          xlink:href="https://example.com/images/1.jpg"/>
+      </file>
+      <file ID="FID2" MIMETYPE="image/jpeg" SEQ="3">
+        <FLocat LOCTYPE="URL" xlink:type="simple"
+          xlink:href="https://example.com/images/2.jpg"/>
+      </file>
+      <file ID="FID3" MIMETYPE="image/png" SEQ="4">
+        <FLocat LOCTYPE="URL" xlink:type="simple"
+          xlink:href="https://example.com/images/3.png"/>
+      </file>
+    </fileGrp>
+    <fileGrp ID="FG_THUMBS" USE="THUMBNAILS">
+      <file ID="TID0" MIMETYPE="image/jpeg" SEQ="1">
+        <FLocat LOCTYPE="URL" xlink:type="simple"
+          xlink:href="https://example.com/thumbs/0.jpg"/>
+      </file>
+    </fileGrp>
+  </fileSec>
+  <structMap ID="SM1" TYPE="PHYSICAL">
+    <div ORDER="1" LABEL="[Liber commicus] / sample" TYPE="book">
+      <div ORDER="1" LABEL="[Cubierta]" TYPE="page">
+        <fptr FILEID="FID0"/>
+      </div>
+      <div ORDER="2" TYPE="page">
+        <fptr FILEID="FID1"/>
+      </div>
+      <div ORDER="3" LABEL="1r" TYPE="page">
+        <fptr FILEID="FID2"/>
+      </div>
+      <div ORDER="4" LABEL="1v" TYPE="page">
+        <fptr FILEID="FID3"/>
+      </div>
+    </div>
+  </structMap>
+</mets>

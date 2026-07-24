@@ -15,6 +15,8 @@ class FileTracker:
         output_dir: str,
         total_images: int,
         canvases: list[dict[str, Any]] | None = None,
+        index_prefix: str = "canvas",
+        fallback_prefix: str = "image",
     ):
         """Initialize the file tracker.
 
@@ -22,10 +24,14 @@ class FileTracker:
             output_dir: Output directory for images
             total_images: Total number of images expected
             canvases: List of canvas objects for label-based naming (optional)
+            index_prefix: Prefix for hybrid filenames (default: canvas)
+            fallback_prefix: Prefix for numeric filenames (default: image)
         """
         self.output_dir = output_dir
         self.total_images = total_images
         self.canvases = canvases
+        self.index_prefix = index_prefix
+        self.fallback_prefix = fallback_prefix
         self.manifest_file = os.path.join(output_dir, ".iiif-download-state.json")
         self.downloaded_indices: set[int] = set()
         self._load_state()
@@ -56,9 +62,15 @@ class FileTracker:
             )
 
             canvas = self.canvases[idx]
-            # Check new hybrid naming (canvas-XXX_label.ext)
+            # Check hybrid naming (prefix-XXX_label.ext)
             for ext in extensions:
-                filename = get_filename_from_canvas(canvas, idx, ext)
+                filename = get_filename_from_canvas(
+                    canvas,
+                    idx,
+                    ext,
+                    fallback_prefix=self.fallback_prefix,
+                    index_prefix=self.index_prefix,
+                )
                 filenames.append(os.path.join(self.output_dir, filename))
 
             # Also check old label-only naming (just label.ext) for migration
@@ -72,11 +84,14 @@ class FileTracker:
                     if old_label_filename not in filenames:
                         filenames.append(old_label_filename)
 
-        # Always check old numeric naming for backward compatibility
+        # Always check numeric naming for backward compatibility
         for ext in extensions:
-            filename = os.path.join(self.output_dir, f"image_{idx + 1:03d}.{ext}")
-            if filename not in filenames:
-                filenames.append(filename)
+            for prefix in {self.fallback_prefix, "image", "page"}:
+                filename = os.path.join(
+                    self.output_dir, f"{prefix}_{idx + 1:03d}.{ext}"
+                )
+                if filename not in filenames:
+                    filenames.append(filename)
 
         return filenames
 
