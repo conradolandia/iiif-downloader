@@ -43,11 +43,12 @@ jobs:
 
     - name: Test single canvas download
       run: |
-        timeout 30s ./dist/iiif-downloader \
+        timeout 60s ./dist/iiif-downloader \
           --source "https://www.e-codices.unifr.ch/metadata/iiif/ubb-A-II-0005/manifest.json" \
           --output "test-ci" \
           --canvas 1 \
-          --size 512 || true
+          --size 512
+        test -n "$(find test-ci -type f \( -name '*.jpeg' -o -name '*.jpg' -o -name '*.png' \) | head -1)"
         echo "✅ Single canvas download test completed"
 
     - name: Test metadata extraction

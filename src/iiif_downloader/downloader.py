@@ -585,7 +585,9 @@ class IIIFDownloader:
                 return
 
             self.console.print("[dim]Fetching image info...[/dim]")
-            info = fetch_image_info(image_service_url, self.headers, self.verbose)
+            info = fetch_image_info(
+                image_service_url, self.session_manager, self.verbose
+            )
 
             # If info.json fetch failed, try extracting from canvas resource
             if not info:
