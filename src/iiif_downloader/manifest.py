@@ -190,6 +190,10 @@ def get_image_info_from_canvas_resource(
 ) -> dict[str, Any] | None:
     """Extract image info from canvas resource when info.json is unavailable.
 
+    Prefers canvas width/height over annotation body/resource dimensions. Many
+    Presentation API v3 manifests embed a small default rendering on ``body``
+    (e.g. 765x1024) while the canvas declares the full image size.
+
     Args:
         canvas: Canvas object from IIIF manifest
         version: The detected IIIF version ('2.1' or '3.0')
@@ -197,13 +201,16 @@ def get_image_info_from_canvas_resource(
     Returns:
         dict: Pseudo image info dict with width, height, format, and service ID, or None
     """
+    canvas_width = canvas.get("width")
+    canvas_height = canvas.get("height")
+
     if version == "2.1":
         # IIIF v2.1: images are in images[0].resource
         images = canvas.get("images", [])
         if images and "resource" in images[0]:
             resource = images[0]["resource"]
-            width = resource.get("width")
-            height = resource.get("height")
+            width = canvas_width or resource.get("width")
+            height = canvas_height or resource.get("height")
             format_str = resource.get("format", "jpg")
 
             # Get service ID
@@ -233,8 +240,8 @@ def get_image_info_from_canvas_resource(
                 annotation = first_item["items"][0]
                 if "body" in annotation:
                     body = annotation["body"]
-                    width = body.get("width")
-                    height = body.get("height")
+                    width = canvas_width or body.get("width")
+                    height = canvas_height or body.get("height")
                     format_str = body.get("format", "jpg")
 
                     # Get service ID
@@ -340,6 +347,11 @@ def max_requestable_width(
     Applies IIIF maxWidth, maxHeight, and maxArea. When ``max_edge`` is set
     (from probing), both resulting width and height are capped to that edge.
 
+    When ``maxWidth`` is set but ``maxHeight`` is not, ``maxWidth`` is also
+    applied as a max edge. Some hosts (Digirati DLCS) reject ``w,`` requests
+    whose scaled height would exceed ``maxWidth`` even though width alone is
+    under the cap.
+
     Args:
         image_width: Full image width in pixels
         image_height: Full image height in pixels
@@ -357,6 +369,9 @@ def max_requestable_width(
     if limits is not None:
         if limits.max_width is not None:
             candidates.append(limits.max_width)
+            # maxWidth-only services often enforce it as a max edge
+            if limits.max_height is None and image_height > 0:
+                candidates.append(int(limits.max_width * image_width / image_height))
         if limits.max_height is not None and image_height > 0:
             candidates.append(int(limits.max_height * image_width / image_height))
         if limits.max_area is not None and image_height > 0:

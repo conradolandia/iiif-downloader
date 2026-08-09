@@ -254,18 +254,20 @@ class MetsDownloader:
                     update_status_description()
 
                 except requests.RequestException as exc:
-                    self.console.print(
+                    progress.console.print(
                         f"[bold red]Error downloading page {idx + 1}:[/bold red] {exc}"
                     )
                     status_code = None
                     if hasattr(exc, "response") and exc.response is not None:
                         status_code = exc.response.status_code
-                    self.rate_limiter.handle_error(status_code)
+                    backoff_msg = self.rate_limiter.handle_error(status_code)
+                    if backoff_msg:
+                        progress.console.print(f"[yellow]{backoff_msg}[/yellow]")
                     failed_count += 1
                     progress.update(main_task, advance=1)
                     update_status_description()
                 except Exception as exc:
-                    self.console.print(
+                    progress.console.print(
                         f"[bold red]Unexpected error processing page {idx + 1}:"
                         f"[/bold red] {exc}"
                     )

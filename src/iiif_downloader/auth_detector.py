@@ -2,6 +2,17 @@
 
 from typing import Any
 
+# Plain-text / JSON IIIF errors that are size limits, not bot walls.
+_SIZE_LIMIT_BODY_MARKERS = (
+    "maxwidth",
+    "maxheight",
+    "maxarea",
+    "requested size",
+    "exceeds max",
+    "size exceeds",
+    "invalid size",
+)
+
 
 def is_html_response(response: Any) -> bool:
     """Check if a response is HTML (not JSON or image).
@@ -74,8 +85,42 @@ def is_recaptcha_page(response: Any) -> bool:
     return any(indicator in text for indicator in recaptcha_indicators)
 
 
+def is_size_limit_rejection(response: Any) -> bool:
+    """Return True if the response is an IIIF max size rejection.
+
+    Some hosts (e.g. Digirati DLCS) return HTTP 403 with a plain-text body such
+    as ``Requested size '4781,' exceeds maxWidth of 5000``. That must not be
+    treated as bot protection.
+
+    Args:
+        response: requests.Response object
+
+    Returns:
+        bool: True when the body indicates a size / maxWidth limit error
+    """
+    if response.status_code not in (400, 403, 413):
+        return False
+
+    content_type = response.headers.get("Content-Type", "").lower()
+    if is_html_response(response):
+        return False
+    # Images are never size-error messages
+    if content_type.startswith("image/"):
+        return False
+
+    try:
+        text = (response.text or "").lower()
+    except Exception:
+        return False
+
+    return any(marker in text for marker in _SIZE_LIMIT_BODY_MARKERS)
+
+
 def is_authentication_required(response: Any) -> bool:
-    """Check if authentication is required based on response.
+    """Check if authentication or a bot challenge is required.
+
+    HTTP 403 alone is not treated as auth: IIIF servers often use 403 for
+    size-limit errors. Prefer Cloudflare/reCAPTCHA/HTML login signals.
 
     Args:
         response: requests.Response object
@@ -83,8 +128,11 @@ def is_authentication_required(response: Any) -> bool:
     Returns:
         bool: True if authentication appears to be required, False otherwise
     """
-    # Check status code
-    if response.status_code in (401, 403):
+    if is_size_limit_rejection(response):
+        return False
+
+    # Check status code — 401 is authoritative; bare 403 is not
+    if response.status_code == 401:
         return True
 
     # Check for authentication headers
@@ -95,7 +143,20 @@ def is_authentication_required(response: Any) -> bool:
     if is_cloudflare_challenge(response) or is_recaptcha_page(response):
         return True
 
-    # Check for common authentication page indicators
+    # HTML 403 with login wording
+    if response.status_code == 403 and is_html_response(response):
+        text = response.text.lower()
+        auth_indicators = [
+            "login",
+            "sign in",
+            "authentication required",
+            "access denied",
+            "unauthorized",
+            "forbidden",
+        ]
+        return any(indicator in text for indicator in auth_indicators)
+
+    # Other HTML pages that look like login walls
     if is_html_response(response):
         text = response.text.lower()
         auth_indicators = [

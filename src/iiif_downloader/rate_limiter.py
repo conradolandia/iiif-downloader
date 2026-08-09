@@ -44,11 +44,14 @@ class RateLimiter:
                 self.base_delay, self.delay_between_requests * 0.9
             )
 
-    def handle_error(self, status_code: int | None = None):
+    def handle_error(self, status_code: int | None = None) -> str | None:
         """Handle a request error with exponential backoff.
 
         Args:
             status_code: HTTP status code of the error
+
+        Returns:
+            str | None: Backoff message for the caller to display, if any
         """
         if not self.fixed_rate:
             self.consecutive_errors += 1
@@ -65,9 +68,11 @@ class RateLimiter:
             )
             self.delay_between_requests = min(backoff_delay, self.max_backoff)
 
-            print(
-                f"Rate limiting: backing off to {self.delay_between_requests:.1f}s delay"
+            return (
+                f"Rate limiting: backing off to "
+                f"{self.delay_between_requests:.1f}s delay"
             )
+        return None
 
     def get_current_rate(self) -> float:
         """Get current effective rate in requests per minute.

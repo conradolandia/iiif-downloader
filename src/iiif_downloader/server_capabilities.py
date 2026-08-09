@@ -2,11 +2,15 @@
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
+
+from iiif_downloader.servers import ServerAdapter, resolve_adapter
 
 # Fields that depend on a specific image and must not be reused from domain cache
 _IMAGE_SPECIFIC_CACHE_KEYS = frozenset(
@@ -84,38 +88,37 @@ def _save_cached_capabilities(
 
 
 def _size_request_ok(
-    service_id: str, format_str: str, size: int, session_manager
+    service_id: str,
+    format_str: str,
+    size: int,
+    session_manager,
+    adapter: ServerAdapter,
 ) -> bool:
-    """Return True if a HEAD request for the given width succeeds."""
+    """Return True if a short HEAD request for the given width succeeds.
+
+    Uses the adapter probe timeout so a hung IIIF size cannot stall probing.
+    """
     test_url = f"{service_id}/full/{size},/0/default.{format_str}"
     try:
-        response = session_manager.head(test_url, timeout=5)
+        response = session_manager.head(test_url, timeout=adapter.probe_head_timeout)
         return response.status_code == 200
     except requests.RequestException:
         return False
 
 
-def _test_format(service_id: str, test_size: int, session_manager) -> tuple[str, bool]:
+def _test_format(
+    service_id: str,
+    test_size: int,
+    session_manager,
+    adapter: ServerAdapter,
+) -> tuple[str, bool]:
     """Test format support and return (format, success)."""
     for format_option in ["jpeg", "jpg"]:
-        if _size_request_ok(service_id, format_option, test_size, session_manager):
+        if _size_request_ok(
+            service_id, format_option, test_size, session_manager, adapter
+        ):
             return format_option, True
     return "jpg", False  # Default fallback
-
-
-def _find_working_size(
-    service_id: str, format_str: str, hi: int, session_manager
-) -> int | None:
-    """Find a width that works, at or below ``hi``."""
-    candidates = []
-    for size in (hi, 500, 256, 128, 64, 1):
-        if 1 <= size <= hi and size not in candidates:
-            candidates.append(size)
-
-    for size in candidates:
-        if _size_request_ok(service_id, format_str, size, session_manager):
-            return size
-    return None
 
 
 def _test_maximum_size(
@@ -123,19 +126,26 @@ def _test_maximum_size(
     format_str: str,
     desired_size: int,
     session_manager,
+    adapter: ServerAdapter,
     upper_bound: int | None = None,
+    trust_declared_limits: bool = False,
 ) -> int | None:
-    """Binary-search the maximum supported request width.
+    """Find a usable request width without exhaustive binary search.
+
+    Prefer a single verify of the desired width, then adapter fallback sizes.
+    Some hosts hang on HEAD for certain widths; adapters encode that policy.
 
     Args:
         service_id: Image service base URL
         format_str: Image format extension (jpg/jpeg)
         desired_size: Target width to try (inclusive upper goal)
         session_manager: Session manager for HTTP requests
+        adapter: Host adapter providing timeouts and fallback sizes
         upper_bound: Optional hard cap (e.g. declared maxWidth)
+        trust_declared_limits: If True and HEAD is inconclusive, still return ``hi``
 
     Returns:
-        int | None: Largest working width, or None if no size works
+        int | None: Chosen width, or None if no size works
     """
     hi = desired_size
     if upper_bound is not None:
@@ -143,32 +153,28 @@ def _test_maximum_size(
     if hi < 1:
         return None
 
-    if _size_request_ok(service_id, format_str, hi, session_manager):
+    if _size_request_ok(service_id, format_str, hi, session_manager, adapter):
         return hi
 
-    lo = _find_working_size(service_id, format_str, hi, session_manager)
-    if lo is None:
-        return None
-    if lo >= hi:
-        return lo
+    for size in adapter.fallback_probe_sizes(hi):
+        if size == hi:
+            continue
+        if _size_request_ok(service_id, format_str, size, session_manager, adapter):
+            return size
 
-    # lo works, hi does not: binary search the open interval (lo, hi)
-    left = lo
-    right = hi - 1
-    best = lo
-    while left <= right:
-        mid = (left + right) // 2
-        if _size_request_ok(service_id, format_str, mid, session_manager):
-            best = mid
-            left = mid + 1
-        else:
-            right = mid - 1
+    # Declared info.json limits already capped ``hi``; GET often works when HEAD hangs
+    if trust_declared_limits:
+        return hi
 
-    return best
+    return None
 
 
 def _test_quality_levels(
-    service_id: str, format_str: str, test_size: int, session_manager
+    service_id: str,
+    format_str: str,
+    test_size: int,
+    session_manager,
+    adapter: ServerAdapter,
 ) -> list[str]:
     """Test which quality levels are supported."""
     qualities = ["default", "color", "gray", "bitonal"]
@@ -177,7 +183,9 @@ def _test_quality_levels(
     for quality in qualities:
         test_url = f"{service_id}/full/{test_size},/0/{quality}.{format_str}"
         try:
-            response = session_manager.head(test_url, timeout=5)
+            response = session_manager.head(
+                test_url, timeout=adapter.probe_head_timeout
+            )
             if response.status_code == 200:
                 supported.append(quality)
         except requests.RequestException:
@@ -187,12 +195,16 @@ def _test_quality_levels(
 
 
 def _test_authentication(
-    service_id: str, format_str: str, test_size: int, session_manager
+    service_id: str,
+    format_str: str,
+    test_size: int,
+    session_manager,
+    adapter: ServerAdapter,
 ) -> bool:
     """Test if authentication is required."""
     test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
     try:
-        response = session_manager.head(test_url, timeout=5)
+        response = session_manager.head(test_url, timeout=adapter.probe_head_timeout)
         # Check for authentication-related status codes
         if response.status_code == 401:
             return True
@@ -205,7 +217,11 @@ def _test_authentication(
 
 
 def _test_rate_limiting(
-    service_id: str, format_str: str, test_size: int, session_manager
+    service_id: str,
+    format_str: str,
+    test_size: int,
+    session_manager,
+    adapter: ServerAdapter,
 ) -> bool:
     """Test if rate limiting is detected by making rapid requests."""
     test_url = f"{service_id}/full/{test_size},/0/default.{format_str}"
@@ -214,7 +230,9 @@ def _test_rate_limiting(
         # Make 3 rapid requests
         responses = []
         for _ in range(3):
-            response = session_manager.head(test_url, timeout=5)
+            response = session_manager.head(
+                test_url, timeout=adapter.probe_head_timeout
+            )
             responses.append(response.status_code)
 
         # Check if we got 429 (Too Many Requests) or consistent delays
@@ -235,6 +253,9 @@ def _derive_max_edge(
 ) -> int:
     """Derive the maximum allowed edge length from a probed width.
 
+    Uses ceil for the scaled height so reverse-applying ``max_edge`` does not
+    undercut the probed width (truncation would request a smaller, untested size).
+
     Args:
         max_width: Maximum requestable width found by probing
         image_width: Full width of the probed image
@@ -244,9 +265,83 @@ def _derive_max_edge(
         int: Maximum of probed width and resulting scaled height
     """
     if image_width and image_height and image_width > 0:
-        resulting_height = int(max_width * image_height / image_width)
+        resulting_height = math.ceil(max_width * image_height / image_width)
         return max(max_width, resulting_height)
     return max_width
+
+
+def _preferred_format_from_info(
+    image_info: dict[str, Any], adapter: ServerAdapter
+) -> str:
+    """Pick jpg/jpeg from info.json profile formats, else adapter default.
+
+    Args:
+        image_info: Parsed info.json body
+        adapter: Host adapter providing ``default_format``
+
+    Returns:
+        str: ``jpg`` or ``jpeg``
+    """
+    candidates: list[str] = []
+
+    profile = image_info.get("profile")
+    profile_objects: list[dict[str, Any]] = []
+    if isinstance(profile, list):
+        profile_objects = [p for p in profile if isinstance(p, dict)]
+    elif isinstance(profile, dict):
+        profile_objects = [profile]
+
+    for item in profile_objects:
+        formats = item.get("formats")
+        if isinstance(formats, list):
+            candidates.extend(str(f).lower() for f in formats)
+
+    for key in ("preferredFormats", "extraFormats"):
+        formats = image_info.get(key)
+        if isinstance(formats, list):
+            candidates.extend(str(f).lower() for f in formats)
+
+    for preferred in ("jpg", "jpeg"):
+        if preferred in candidates:
+            return preferred
+
+    default = (adapter.default_format or "jpg").lower()
+    return default if default in ("jpg", "jpeg") else "jpg"
+
+
+def capabilities_from_info(
+    service_id: str,
+    image_info: dict[str, Any],
+    adapter: ServerAdapter | None = None,
+) -> ServerCapabilities:
+    """Build capabilities from info.json without HEAD probes.
+
+    Size limits stay per-image via ``get_image_size_from_info``; this only
+    records domain-level format defaults. ``max_edge`` is left unset so each
+    image uses its own declared maxWidth/maxHeight/maxArea.
+
+    Args:
+        service_id: Image service base URL
+        image_info: Parsed info.json body
+        adapter: Host adapter; resolved from ``service_id`` when omitted
+
+    Returns:
+        ServerCapabilities: Format and domain metadata from JSON
+    """
+    adapter = adapter or resolve_adapter(service_id)
+    parsed_url = urlparse(service_id)
+    server_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+    return ServerCapabilities(
+        preferred_format=_preferred_format_from_info(image_info, adapter),
+        supports_full_size=False,
+        max_test_size=None,
+        max_edge=None,
+        supported_qualities=["default"],
+        requires_authentication=False,
+        rate_limit_detected=False,
+        server_domain=server_domain,
+    )
 
 
 def probe_server_capabilities(
@@ -257,11 +352,14 @@ def probe_server_capabilities(
     upper_bound: int | None = None,
     image_width: int | None = None,
     image_height: int | None = None,
+    trust_declared_limits: bool | None = None,
+    adapter: ServerAdapter | None = None,
 ) -> ServerCapabilities:
     """Probe server capabilities by testing a sample image request.
 
     Domain-level results (format, qualities, auth) may be cached. Per-image
-    size limits are always probed for the current sample.
+    size limits are always probed for the current sample. Host adapters supply
+    timeouts, fallback sizes, and declared-limit trust policy.
 
     Args:
         service_id: The image service ID (from image info)
@@ -271,10 +369,14 @@ def probe_server_capabilities(
         upper_bound: Optional hard cap for size probing (e.g. declared maxWidth)
         image_width: Full width of the sample image (for max_edge derivation)
         image_height: Full height of the sample image (for max_edge derivation)
+        trust_declared_limits: Override adapter trust policy; None uses adapter
+        adapter: Host adapter; resolved from ``service_id`` when omitted
 
     Returns:
         ServerCapabilities: Discovered server capabilities
     """
+    adapter = adapter or resolve_adapter(service_id)
+
     # Extract server domain for caching
     parsed_url = urlparse(service_id)
     server_domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
@@ -287,34 +389,44 @@ def probe_server_capabilities(
     if cached is not None and cached.preferred_format:
         format_to_test = cached.preferred_format
         format_works = _size_request_ok(
-            service_id, format_to_test, format_probe_size, session_manager
+            service_id, format_to_test, format_probe_size, session_manager, adapter
         )
         if not format_works:
             format_to_test, format_works = _test_format(
-                service_id, format_probe_size, session_manager
+                service_id, format_probe_size, session_manager, adapter
             )
     else:
         format_to_test, format_works = _test_format(
-            service_id, format_probe_size, session_manager
+            service_id, format_probe_size, session_manager, adapter
         )
 
     if not format_works:
         format_to_test = "jpg"
 
-    # Always probe maximum supported size for this image
+    has_declared_limits = upper_bound is not None
+    if trust_declared_limits is None:
+        trust_limits = adapter.should_trust_declared_limits(has_declared_limits)
+    else:
+        trust_limits = trust_declared_limits
+
+    # When info.json declared limits capped sample_image_size, trust that width
+    # even if HEAD is flaky rather than searching hang-prone sizes.
     max_size = _test_maximum_size(
         service_id,
         format_to_test,
         sample_image_size,
         session_manager,
+        adapter,
         upper_bound=upper_bound,
+        trust_declared_limits=trust_limits or has_declared_limits,
     )
 
     supports_full_size = max_size is not None and max_size >= sample_image_size
     max_edge = (
         _derive_max_edge(max_size, image_width, image_height) if max_size else None
     )
-    quality_test_size = max_size or format_probe_size
+    # Use a small width for quality/auth/rate probes (faster, fewer server hangs)
+    quality_test_size = format_probe_size
 
     if cached is not None:
         supported_qualities = cached.supported_qualities or ["default"]
@@ -322,13 +434,13 @@ def probe_server_capabilities(
         rate_limit_detected = cached.rate_limit_detected
     else:
         supported_qualities = _test_quality_levels(
-            service_id, format_to_test, quality_test_size, session_manager
+            service_id, format_to_test, quality_test_size, session_manager, adapter
         )
         requires_auth = _test_authentication(
-            service_id, format_to_test, quality_test_size, session_manager
+            service_id, format_to_test, quality_test_size, session_manager, adapter
         )
         rate_limit_detected = _test_rate_limiting(
-            service_id, format_to_test, quality_test_size, session_manager
+            service_id, format_to_test, quality_test_size, session_manager, adapter
         )
 
     capabilities = ServerCapabilities(

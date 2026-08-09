@@ -142,6 +142,8 @@ If a server requires login or shows bot protection, export cookies from a browse
 
 - IIIF Presentation API v2.1 (`sequences[0].canvases`) and v3.0 (`items`)
 - IIIF Image API size negotiation when `info.json` is available; falls back to canvas resource data when it is not
+- Host adapters under `servers/` encode per-site quirks (e.g. Bodleian skips Content-Length HEAD)
+- Size selection uses `info.json` limits; if a size is rejected (HTTP 403/400/413), the client negotiates a smaller width on download
 - METS: first `fileGrp`, PHYSICAL `structMap`, MARC in `dmdSec`
 
 ### Building a local executable
@@ -164,6 +166,7 @@ src/iiif_downloader/
 ├── downloader.py          # IIIF orchestration
 ├── mets_downloader.py     # METS orchestration
 ├── sources/               # Source adapters (iiif, mets)
+├── servers/               # Host adapters (Bodleian quirks, …)
 ├── manifest.py            # IIIF parsing / sizing
 ├── image_downloader.py    # HTTP download / size estimation
 ├── session_manager.py     # Session and cookies

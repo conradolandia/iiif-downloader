@@ -36,12 +36,13 @@ class SessionManager:
         # Set default headers
         self.session.headers.update(get_default_headers())
 
-        # Configure retry strategy
+        # Retry GETs on transient server errors. Do not retry HEAD: capability
+        # probes and Content-Length checks must fail fast on timeouts.
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS"],
+            allowed_methods=["GET", "OPTIONS"],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)

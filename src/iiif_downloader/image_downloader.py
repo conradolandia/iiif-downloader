@@ -11,13 +11,53 @@ from .auth_detector import (
     get_auth_error_message,
     is_authentication_required,
     is_recaptcha_page,
+    is_size_limit_rejection,
 )
 from .constants import (
     DOWNLOAD_RETRY_BACKOFF_SECONDS,
     JSON_CONTENT_TYPES,
     MAX_DOWNLOAD_RETRIES,
     MIN_VALID_IMAGE_BYTES,
+    SIZE_STATUS_CHECK_TIMEOUT,
 )
+from .server_capabilities import _derive_max_edge
+from .servers import ServerAdapter, resolve_adapter
+
+# HTTP statuses used by some IIIF hosts when a requested size is too large.
+# 400 is handled as format first, then as size if every extension fails.
+_SIZE_REJECTION_STATUSES = frozenset({403, 413})
+_FORMAT_REJECTION_STATUSES = frozenset({400, 404, 415})
+_MIN_FALLBACK_WIDTH = 256
+
+
+def _format_byte_size(num_bytes: int) -> str:
+    """Format a byte count for progress display.
+
+    Args:
+        num_bytes: Number of bytes
+
+    Returns:
+        str: Human-readable size string
+    """
+    if num_bytes > 1024 * 1024:
+        return f"{num_bytes / 1024 / 1024:.1f} MB"
+    if num_bytes > 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes} B"
+
+
+def _progress_print(progress, console: Console, message: str) -> None:
+    """Print a message without corrupting a live Rich Progress display.
+
+    Args:
+        progress: Rich Progress object, or None
+        console: Fallback Console when progress is not active
+        message: Markup message to print
+    """
+    if progress is not None:
+        progress.console.print(message)
+    else:
+        console.print(message)
 
 
 def remove_incomplete_file(filename: str) -> None:
@@ -101,20 +141,35 @@ def estimate_file_size_from_dimensions(
 
 
 def get_content_length_from_head(
-    image_url: str, session_manager, timeout: tuple[int, int] = (30, 60)
+    image_url: str,
+    session_manager,
+    timeout: tuple[float, float] | None = None,
+    adapter: ServerAdapter | None = None,
 ) -> int | None:
-    """Get Content-Length from HEAD request.
+    """Get Content-Length from a short HEAD request.
+
+    Uses a short timeout and fails open: many IIIF servers omit Content-Length
+    or hang on HEAD for some sizes. Download proceeds with GET regardless.
+    Host adapters may skip this HEAD entirely.
 
     Args:
         image_url: URL of the image to download
         session_manager: SessionManager instance for making requests
-        timeout: Connection and read timeout tuple
+        timeout: Connection and read timeout tuple; adapter default when None
+        adapter: Host adapter; resolved from ``image_url`` when omitted
 
     Returns:
         int: Content-Length in bytes, or None if not available
     """
+    adapter = adapter or resolve_adapter(image_url)
+    if adapter.skip_content_length_head:
+        return None
+
+    head_timeout = (
+        timeout if timeout is not None else adapter.head_content_length_timeout
+    )
     try:
-        response = session_manager.head(image_url, timeout=timeout)
+        response = session_manager.head(image_url, timeout=head_timeout)
         response.raise_for_status()
 
         # Check for authentication/bot protection
@@ -131,18 +186,191 @@ def get_content_length_from_head(
     return None
 
 
-def fetch_image_info(image_service_url, session_manager, verbose=False):
+def _iiif_image_url(service_id: str, width: int, image_format: str) -> str:
+    """Build a full-region IIIF Image API request URL for a given width.
+
+    Args:
+        service_id: Image service base URL
+        width: Requested width in pixels
+        image_format: File extension without dot (jpg/jpeg)
+
+    Returns:
+        str: Absolute image request URL
+    """
+    return f"{service_id}/full/{width},/0/default.{image_format}"
+
+
+def _listed_widths_below(image_info: dict | None, upper: int) -> list[int]:
+    """Return descending widths from info.json ``sizes`` strictly below ``upper``.
+
+    Args:
+        image_info: Parsed info.json (optional)
+        upper: Exclusive upper bound
+
+    Returns:
+        list[int]: Candidate widths, largest first
+    """
+    if not image_info or "sizes" not in image_info:
+        return []
+    widths: list[int] = []
+    for entry in image_info.get("sizes") or []:
+        try:
+            width = int(entry.get("width"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if _MIN_FALLBACK_WIDTH <= width < upper and width not in widths:
+            widths.append(width)
+    widths.sort(reverse=True)
+    return widths
+
+
+def _request_status(
+    image_url: str,
+    session_manager,
+    timeout: tuple[float, float] = SIZE_STATUS_CHECK_TIMEOUT,
+) -> int | None:
+    """Return HTTP status for an image URL without reading the body.
+
+    Args:
+        image_url: Absolute image request URL
+        session_manager: SessionManager instance
+        timeout: Connect/read timeout
+
+    Returns:
+        int | None: Status code, or None on transport failure
+    """
+    response = None
+    try:
+        response = session_manager.get(image_url, stream=True, timeout=timeout)
+        return int(response.status_code)
+    except requests.RequestException:
+        return None
+    finally:
+        if response is not None:
+            response.close()
+
+
+def _width_is_allowed(
+    service_id: str,
+    width: int,
+    image_format: str,
+    session_manager,
+) -> bool:
+    """Return True if the server accepts a full-region request at ``width``.
+
+    Args:
+        service_id: Image service base URL
+        width: Width to test
+        image_format: jpg/jpeg extension
+        session_manager: SessionManager instance
+
+    Returns:
+        bool: True when status is 200
+    """
+    status = _request_status(
+        _iiif_image_url(service_id, width, image_format), session_manager
+    )
+    return status == 200
+
+
+def find_max_requestable_width(
+    service_id: str,
+    desired_width: int,
+    image_format: str,
+    session_manager,
+    image_info: dict | None = None,
+) -> int | None:
+    """Find the largest working width at or below ``desired_width`` via GET status.
+
+    Used when the preferred size is rejected (403/400/413). Prefers listed
+    ``sizes`` as a known-good floor, then binary-searches upward.
+
+    Args:
+        service_id: Image service base URL
+        desired_width: Width that was rejected (search is below this)
+        image_format: jpg/jpeg extension
+        session_manager: SessionManager instance
+        image_info: Optional info.json for listed sizes
+
+    Returns:
+        int | None: Largest accepted width, or None if none work
+    """
+    if desired_width < _MIN_FALLBACK_WIDTH:
+        return None
+
+    best: int | None = None
+    for listed in _listed_widths_below(image_info, desired_width):
+        if _width_is_allowed(service_id, listed, image_format, session_manager):
+            best = listed
+            break
+
+    lo = best if best is not None else _MIN_FALLBACK_WIDTH
+    hi = desired_width - 1
+    if best is None and _width_is_allowed(
+        service_id, lo, image_format, session_manager
+    ):
+        best = lo
+
+    while lo <= hi:
+        mid = (lo + hi + 1) // 2
+        if _width_is_allowed(service_id, mid, image_format, session_manager):
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return best
+
+
+def _remember_working_width(
+    server_capabilities,
+    working_width: int,
+    image_info: dict | None,
+) -> None:
+    """Tighten shared capabilities after a size rejection forced a smaller width.
+
+    Only lowers ``max_test_size`` / ``max_edge``. A successful download at the
+    originally requested size must not invent a ceiling.
+
+    Args:
+        server_capabilities: Mutable ServerCapabilities or None
+        working_width: Width that returned HTTP 200 after negotiation
+        image_info: Optional info.json for max_edge derivation
+    """
+    if server_capabilities is None:
+        return
+    previous = server_capabilities.max_test_size
+    if previous is not None and working_width >= previous:
+        return
+    server_capabilities.max_test_size = working_width
+    width = image_info.get("width") if image_info else None
+    height = image_info.get("height") if image_info else None
+    try:
+        w = int(width) if width is not None else None
+        h = int(height) if height is not None else None
+    except (TypeError, ValueError):
+        w, h = None, None
+    server_capabilities.max_edge = _derive_max_edge(working_width, w, h)
+
+
+def fetch_image_info(
+    image_service_url,
+    session_manager,
+    verbose=False,
+    console: Console | None = None,
+):
     """Fetch and parse image info from IIIF image service.
 
     Args:
         image_service_url: URL of the image service
         session_manager: SessionManager instance for making requests
         verbose: Whether to print verbose output
+        console: Console to use for messages (defaults to a new Console)
 
     Returns:
         dict: Parsed image info JSON, or None if error
     """
-    console = Console()
+    console = console or Console()
     image_info_url = image_service_url + "/info.json"
 
     if verbose:
@@ -228,11 +456,9 @@ def download_url_stream(
     timeout = (30, 60)
 
     if verbose:
-        console.print(f"[dim]Connecting to: {image_url}[/dim]")
+        _progress_print(progress, console, f"[dim]Connecting to: {image_url}[/dim]")
 
-    head_content_length = get_content_length_from_head(
-        image_url, session_manager, timeout
-    )
+    head_content_length = get_content_length_from_head(image_url, session_manager)
 
     last_filename = filename
     last_downloaded_bytes = 0
@@ -240,7 +466,7 @@ def download_url_stream(
 
     for attempt in range(1, max_retries + 1):
         if progress and task is not None:
-            progress.update(task, completed=0)
+            progress.update(task, completed=0, total=None)
 
         (
             success,
@@ -258,7 +484,6 @@ def download_url_stream(
             task=task,
             verbose=verbose,
             timeout=timeout,
-            estimated_size=None,
             head_content_length=head_content_length,
             image_size=None,
             service_id="",
@@ -275,9 +500,11 @@ def download_url_stream(
         if attempt < max_retries:
             delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
             reason = failure_reason or "download failed"
-            console.print(
+            _progress_print(
+                progress,
+                console,
                 f"[yellow]Incomplete download ({reason}). "
-                f"Retrying in {delay:.0f}s ({attempt}/{max_retries})...[/yellow]"
+                f"Retrying in {delay:.0f}s ({attempt}/{max_retries})...[/yellow]",
             )
             time.sleep(delay)
 
@@ -295,8 +522,12 @@ def download_image_stream(
     verbose=False,
     image_info=None,
     max_retries: int = MAX_DOWNLOAD_RETRIES,
+    adapter: ServerAdapter | None = None,
 ):
     """Download an image with streaming, validation, and retries.
+
+    When the preferred width is rejected (HTTP 400/403/413), negotiates a
+    smaller working width via GET status checks and retries the download.
 
     Args:
         service_id: Image service ID
@@ -307,103 +538,175 @@ def download_image_stream(
         progress: Rich Progress object (optional)
         task: Progress task ID (optional)
         verbose: Whether to print verbose output
-        image_info: Image info dict with width/height for size estimation (optional)
+        image_info: Parsed info.json for size fallback candidates (optional)
         max_retries: Number of attempts for empty/truncated/network failures
+        adapter: Host adapter; resolved from ``service_id`` when omitted
 
     Returns:
         tuple: (success: bool, final_filename: str, downloaded_bytes: int, chunk_count: int)
     """
     console = Console()
+    adapter = adapter or resolve_adapter(service_id)
 
-    # Use format from server capabilities or default to .jpeg
-    image_format = (
-        server_capabilities.preferred_format if server_capabilities else "jpeg"
-    )
-    image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
+    preferred = server_capabilities.preferred_format if server_capabilities else "jpg"
+    formats: list[str] = []
+    for candidate in (preferred, "jpg", "jpeg"):
+        if candidate and candidate not in formats:
+            formats.append(candidate)
 
-    if verbose:
-        console.print(f"[dim]Connecting to: {image_url}[/dim]")
+    current_size = int(image_size)
+    if server_capabilities and server_capabilities.max_test_size:
+        current_size = min(current_size, int(server_capabilities.max_test_size))
 
-    # Set timeout for connection and read operations
-    timeout = (30, 60)  # (connect timeout, read timeout)
-
-    # Try to get Content-Length from HEAD request first
-    estimated_size = None
-    head_content_length = get_content_length_from_head(
-        image_url, session_manager, timeout
-    )
-
-    # If HEAD request didn't provide Content-Length, try to estimate from image info
-    if head_content_length is None and image_info:
-        width = image_info.get("width")
-        height = image_info.get("height")
-        if width and height:
-            # Calculate height based on aspect ratio if we're requesting a specific width
-            if image_size and width != image_size:
-                # Maintain aspect ratio
-                aspect_ratio = height / width
-                estimated_height = int(image_size * aspect_ratio)
-                estimated_size = estimate_file_size_from_dimensions(
-                    image_size, estimated_height, image_format
-                )
-            else:
-                estimated_size = estimate_file_size_from_dimensions(
-                    width, height, image_format
-                )
-            if verbose and estimated_size:
-                console.print(
-                    f"[dim]Estimated size from dimensions: {estimated_size:,} bytes "
-                    f"({estimated_size / 1024 / 1024:.1f} MB)[/dim]"
-                )
-
+    timeout = (30, 60)
     last_filename = filename
     last_downloaded_bytes = 0
     last_chunk_count = 0
+    size_negotiated = False
 
-    for attempt in range(1, max_retries + 1):
-        if progress and task is not None:
-            progress.update(task, completed=0)
+    while True:
+        size_rejected = False
+        all_formats_rejected = True
+        last_failure: str | None = None
 
-        (
-            success,
-            last_filename,
-            last_downloaded_bytes,
-            last_chunk_count,
-            retryable,
-            failure_reason,
-        ) = _download_image_stream_once(
-            image_url=image_url,
-            filename=last_filename,
-            session_manager=session_manager,
-            server_capabilities=server_capabilities,
-            progress=progress,
-            task=task,
-            verbose=verbose,
-            timeout=timeout,
-            estimated_size=estimated_size,
-            head_content_length=head_content_length,
-            image_size=image_size,
-            service_id=service_id,
-            console=console,
-            allow_iiif_format_fallback=True,
-        )
+        for image_format in formats:
+            base, _ext = os.path.splitext(last_filename)
+            last_filename = f"{base}.{image_format}"
+            image_url = _iiif_image_url(service_id, current_size, image_format)
 
-        if success:
-            return True, last_filename, last_downloaded_bytes, last_chunk_count
+            if verbose:
+                _progress_print(
+                    progress, console, f"[dim]Connecting to: {image_url}[/dim]"
+                )
 
-        if not retryable:
-            return False, last_filename, last_downloaded_bytes, last_chunk_count
-
-        if attempt < max_retries:
-            delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
-            reason = failure_reason or "download failed"
-            console.print(
-                f"[yellow]Incomplete download ({reason}). "
-                f"Retrying in {delay:.0f}s ({attempt}/{max_retries})...[/yellow]"
+            head_content_length = get_content_length_from_head(
+                image_url, session_manager, adapter=adapter
             )
-            time.sleep(delay)
 
-    return False, last_filename, last_downloaded_bytes, last_chunk_count
+            for attempt in range(1, max_retries + 1):
+                if progress and task is not None:
+                    progress.update(task, completed=0, total=None)
+
+                (
+                    success,
+                    last_filename,
+                    last_downloaded_bytes,
+                    last_chunk_count,
+                    retryable,
+                    failure_reason,
+                ) = _download_image_stream_once(
+                    image_url=image_url,
+                    filename=last_filename,
+                    session_manager=session_manager,
+                    server_capabilities=server_capabilities,
+                    progress=progress,
+                    task=task,
+                    verbose=verbose,
+                    timeout=timeout,
+                    head_content_length=head_content_length,
+                    image_size=current_size,
+                    service_id=service_id,
+                    console=console,
+                )
+                last_failure = failure_reason
+
+                if success:
+                    return (
+                        True,
+                        last_filename,
+                        last_downloaded_bytes,
+                        last_chunk_count,
+                    )
+
+                if failure_reason == "size_rejected":
+                    size_rejected = True
+                    all_formats_rejected = False
+                    break
+
+                if failure_reason == "format_rejected":
+                    break  # try next format
+
+                all_formats_rejected = False
+
+                if not retryable:
+                    return (
+                        False,
+                        last_filename,
+                        last_downloaded_bytes,
+                        last_chunk_count,
+                    )
+
+                if attempt < max_retries:
+                    delay = DOWNLOAD_RETRY_BACKOFF_SECONDS * attempt
+                    reason = failure_reason or "download failed"
+                    _progress_print(
+                        progress,
+                        console,
+                        f"[yellow]Incomplete download ({reason}). "
+                        f"Retrying in {delay:.0f}s "
+                        f"({attempt}/{max_retries})...[/yellow]",
+                    )
+                    time.sleep(delay)
+            else:
+                # retries exhausted for this format
+                all_formats_rejected = False
+                continue
+
+            if size_rejected:
+                break
+
+        # 400 on every extension often means the size is invalid for this host
+        if all_formats_rejected and last_failure == "format_rejected":
+            size_rejected = True
+
+        if size_rejected and not size_negotiated:
+            negotiated = find_max_requestable_width(
+                service_id,
+                current_size,
+                formats[0],
+                session_manager,
+                image_info=image_info,
+            )
+            # If preferred format failed status checks, try alternate formats
+            if negotiated is None:
+                for alt_format in formats[1:]:
+                    negotiated = find_max_requestable_width(
+                        service_id,
+                        current_size,
+                        alt_format,
+                        session_manager,
+                        image_info=image_info,
+                    )
+                    if negotiated is not None:
+                        formats = [alt_format] + [f for f in formats if f != alt_format]
+                        break
+
+            if negotiated is None:
+                _progress_print(
+                    progress,
+                    console,
+                    f"[red]Error:[/red] Server rejected size {current_size}px "
+                    "and no smaller width succeeded.",
+                )
+                return (
+                    False,
+                    last_filename,
+                    last_downloaded_bytes,
+                    last_chunk_count,
+                )
+
+            _progress_print(
+                progress,
+                console,
+                f"[yellow]Size {current_size}px rejected; "
+                f"retrying at {negotiated}px[/yellow]",
+            )
+            current_size = negotiated
+            size_negotiated = True
+            _remember_working_width(server_capabilities, current_size, image_info)
+            continue
+
+        return False, last_filename, last_downloaded_bytes, last_chunk_count
 
 
 def _download_image_stream_once(
@@ -415,7 +718,6 @@ def _download_image_stream_once(
     task,
     verbose: bool,
     timeout: tuple[int, int],
-    estimated_size: int | None,
     head_content_length: int | None,
     image_size,
     service_id: str,
@@ -426,45 +728,38 @@ def _download_image_stream_once(
 
     Returns:
         tuple: (success, filename, downloaded_bytes, chunk_count, retryable, failure_reason)
+
+        ``failure_reason`` may be ``size_rejected`` or ``format_rejected`` so the
+        caller can negotiate a different IIIF size or file extension.
     """
-    content_length = head_content_length
+    _ = (allow_iiif_format_fallback, image_size, service_id, server_capabilities)
     expected_bytes: int | None = None
 
     try:
         response = session_manager.get(image_url, stream=True, timeout=timeout)
+
+        status = response.status_code
+
+        # Digirati-style plain-text size errors use HTTP 403 — detect before auth
+        if is_size_limit_rejection(response):
+            response.close()
+            return False, filename, 0, 0, False, "size_rejected"
 
         # Check for authentication/bot protection before processing
         if is_authentication_required(response):
             error_msg = get_auth_error_message(
                 image_url, session_manager.cookie_file, response
             )
-            console.print(error_msg)
+            _progress_print(progress, console, error_msg)
             return False, filename, 0, 0, False, "authentication required"
 
-        # If format fails and we haven't probed, try fallback (IIIF only)
-        if (
-            allow_iiif_format_fallback
-            and not server_capabilities
-            and response.status_code in (400, 404, 415)
-            and service_id
-            and image_size is not None
-        ):
-            image_format = "jpg"
-            image_url = f"{service_id}/full/{image_size},/0/default.{image_format}"
-            # Update filename to match format
-            base, _ext = os.path.splitext(filename)
-            filename = f"{base}.{image_format}"
-            if verbose:
-                console.print(f"[dim]Format fallback, retrying with: {image_url}[/dim]")
-            response = session_manager.get(image_url, stream=True, timeout=timeout)
+        if status in _SIZE_REJECTION_STATUSES:
+            response.close()
+            return False, filename, 0, 0, False, "size_rejected"
 
-            # Check again after retry
-            if is_authentication_required(response):
-                error_msg = get_auth_error_message(
-                    image_url, session_manager.cookie_file, response
-                )
-                console.print(error_msg)
-                return False, filename, 0, 0, False, "authentication required"
+        if status in _FORMAT_REJECTION_STATUSES:
+            response.close()
+            return False, filename, 0, 0, False, "format_rejected"
 
         response.raise_for_status()
         # Check if response is actually an image
@@ -474,60 +769,56 @@ def _download_image_stream_once(
                 error_msg = get_auth_error_message(
                     image_url, session_manager.cookie_file, response
                 )
-                console.print(error_msg)
+                _progress_print(progress, console, error_msg)
             else:
-                console.print(
+                _progress_print(
+                    progress,
+                    console,
                     f"[red]Error:[/red] Server returned HTML instead of image. "
-                    f"Content-Type: {content_type}"
+                    f"Content-Type: {content_type}",
                 )
             return False, filename, 0, 0, False, "html response"
 
         if verbose:
-            console.print(
+            _progress_print(
+                progress,
+                console,
                 f"[dim]Response status: {response.status_code}, "
                 f"Content-Type: {response.headers.get('content-type', 'N/A')}, "
-                f"Content-Length: {response.headers.get('content-length', 'N/A')}[/dim]"
+                f"Content-Length: {response.headers.get('content-length', 'N/A')}[/dim]",
             )
 
-        # Get content length from response headers (most reliable)
+        # Only trust Content-Length for progress totals and completeness checks
         content_length_from_response = response.headers.get("content-length")
         if content_length_from_response:
-            content_length = int(content_length_from_response)
-            expected_bytes = content_length
-        # If still no content length, use estimated size for progress only
-        elif estimated_size:
-            content_length = estimated_size
-        else:
-            content_length = None
+            expected_bytes = int(content_length_from_response)
+        elif head_content_length is not None:
+            expected_bytes = head_content_length
 
-        # Set progress total if we have an estimate
-        if content_length and progress and task is not None:
-            progress.update(task, total=content_length)
-            if verbose:
-                if content_length_from_response:
-                    console.print(f"[dim]Expected size: {content_length:,} bytes[/dim]")
-                else:
-                    console.print(
-                        f"[dim]Using estimated size: {content_length:,} bytes "
-                        f"({content_length / 1024 / 1024:.1f} MB)[/dim]"
-                    )
-
-        # Download with progress tracking
-        downloaded_bytes = 0
-        chunk_count = 0
-        # Store base description for updates when Content-Length is missing
-        base_description = None
+        base_description = "Downloading"
         if progress and task is not None:
             try:
-                base_description = progress.tasks[task].description
+                base_description = progress.tasks[task].description or base_description
             except (KeyError, AttributeError, IndexError):
-                # If we can't get the description, use a default
-                base_description = "Downloading"
+                pass
+            base_description = (
+                base_description.split(" (")[0]
+                if " (" in base_description
+                else base_description
+            )
+            if expected_bytes is not None:
+                progress.update(task, total=expected_bytes, completed=0)
+                if verbose:
+                    _progress_print(
+                        progress,
+                        console,
+                        f"[dim]Expected size: {expected_bytes:,} bytes[/dim]",
+                    )
+            else:
+                progress.update(task, total=None, completed=0)
 
-        # Adaptive estimation: refine estimate as we download
-        adaptive_estimate = content_length
-        samples_for_estimation: list[int] = []
-        min_samples_for_estimate = 5  # Need at least 5 chunks to estimate
+        downloaded_bytes = 0
+        chunk_count = 0
 
         try:
             with open(filename, "wb") as f:
@@ -537,94 +828,27 @@ def _download_image_stream_once(
                         downloaded_bytes += len(chunk)
                         chunk_count += 1
 
-                        # Collect samples for adaptive estimation
-                        if not content_length_from_response and chunk_count <= 20:
-                            samples_for_estimation.append(len(chunk))
-
-                        # Adaptive estimation: if we don't have a reliable size,
-                        # estimate based on average chunk size and download rate
-                        if (
-                            not content_length_from_response
-                            and chunk_count >= min_samples_for_estimate
-                            and len(samples_for_estimation) >= min_samples_for_estimate
-                        ):
-                            # Estimate total based on downloaded bytes
-                            # This is a rough estimate that improves as we download
-                            if not adaptive_estimate or chunk_count % 10 == 0:
-                                # Refine estimate every 10 chunks
-                                # Assume we're about 10-20% through the file
-                                # (conservative estimate)
-                                estimated_total = int(
-                                    downloaded_bytes * 8
-                                )  # Assume we're ~12.5% done
-                                if estimated_total > downloaded_bytes:
-                                    adaptive_estimate = estimated_total
-                                    if progress and task is not None:
-                                        progress.update(task, total=adaptive_estimate)
-                                    if verbose and chunk_count % 20 == 0:
-                                        console.print(
-                                            f"[dim]Refined size estimate: "
-                                            f"{adaptive_estimate:,} bytes "
-                                            f"({adaptive_estimate / 1024 / 1024:.1f} MB)[/dim]"
-                                        )
-
-                        # Update progress (safely handle any progress update errors)
-                        try:
-                            if progress and task is not None:
-                                # Use adaptive estimate if available, otherwise use content_length
-                                total_to_use = adaptive_estimate or content_length
-                                if total_to_use:
+                        if progress and task is not None:
+                            try:
+                                if expected_bytes is not None:
                                     progress.update(task, completed=downloaded_bytes)
-                                else:
-                                    # Update progress even without content-length
-                                    # Show bytes in readable format in the description
-                                    # (update every 10 chunks)
-                                    if chunk_count % 10 == 0:
-                                        if downloaded_bytes > 1024 * 1024:
-                                            size_str = f"{downloaded_bytes / 1024 / 1024:.1f} MB"
-                                        elif downloaded_bytes > 1024:
-                                            size_str = (
-                                                f"{downloaded_bytes / 1024:.1f} KB"
-                                            )
-                                        else:
-                                            size_str = f"{downloaded_bytes} B"
+                                elif chunk_count % 10 == 0:
+                                    size_str = _format_byte_size(downloaded_bytes)
+                                    progress.update(
+                                        task,
+                                        description=f"{base_description} ({size_str})",
+                                    )
+                            except Exception:
+                                pass
 
-                                        # Update description with size
-                                        if base_description:
-                                            # Extract base description if it already has size info
-                                            desc = (
-                                                base_description.split(" (")[0]
-                                                if " (" in base_description
-                                                else base_description
-                                            )
-                                            progress.update(
-                                                task,
-                                                completed=downloaded_bytes,
-                                                description=f"{desc} ({size_str})",
-                                            )
-
-                                        if verbose:
-                                            console.print(
-                                                f"[dim]Downloaded: {downloaded_bytes:,} bytes "
-                                                f"({chunk_count} chunks)[/dim]"
-                                            )
-                                    else:
-                                        # Update completed bytes without changing description
-                                        progress.update(
-                                            task, completed=downloaded_bytes
-                                        )
-                        except Exception:
-                            # If progress update fails, continue downloading
-                            # Don't let progress update errors break the download
-                            pass
-
-                        # Flush to ensure data is written
                         f.flush()
 
-            # After loop completes, iter_content() has finished
-            # This means the stream has ended
             if verbose:
-                console.print(f"[dim]Stream ended after {chunk_count} chunks[/dim]")
+                _progress_print(
+                    progress,
+                    console,
+                    f"[dim]Stream ended after {chunk_count} chunks[/dim]",
+                )
 
             file_size = (
                 os.path.getsize(filename)
@@ -632,9 +856,11 @@ def _download_image_stream_once(
                 else downloaded_bytes
             )
             if verbose:
-                console.print(
+                _progress_print(
+                    progress,
+                    console,
                     f"[dim]Download complete: {file_size} bytes written "
-                    f"({chunk_count} chunks)[/dim]"
+                    f"({chunk_count} chunks)[/dim]",
                 )
 
             complete, reason = is_download_complete(file_size, expected_bytes)
@@ -645,18 +871,19 @@ def _download_image_stream_once(
             return True, filename, downloaded_bytes, chunk_count, False, None
 
         finally:
-            # Explicitly close the connection
             response.close()
             if verbose:
-                console.print("[dim]Connection closed[/dim]")
+                _progress_print(progress, console, "[dim]Connection closed[/dim]")
 
     except requests.RequestException as e:
         remove_incomplete_file(filename)
         if verbose:
-            console.print(f"[red]Error downloading image:[/red] {e}")
+            _progress_print(
+                progress, console, f"[red]Error downloading image:[/red] {e}"
+            )
         return False, filename, 0, 0, True, str(e)
     except OSError as e:
         remove_incomplete_file(filename)
         if verbose:
-            console.print(f"[red]Error writing image:[/red] {e}")
+            _progress_print(progress, console, f"[red]Error writing image:[/red] {e}")
         return False, filename, 0, 0, True, str(e)

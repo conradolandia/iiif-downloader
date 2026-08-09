@@ -5,7 +5,7 @@ from rich.text import Text
 
 
 class CompletedTotalColumn(ProgressColumn):
-    """Custom column that shows 'Unknown' instead of 'None' when total is None."""
+    """Show completed/total, or a dash when total is unknown."""
 
     def render(self, task):
         """Render the completed/total display.
@@ -19,8 +19,8 @@ class CompletedTotalColumn(ProgressColumn):
         completed = task.completed or 0
         total = task.total
         if total is None:
-            return Text(f"{completed}/Unknown", style="bold green")
-        return Text(f"{completed}/{total}", style="bold green")
+            return Text("—", style="bold green")
+        return Text(f"{int(completed)}/{int(total)}", style="bold green")
 
 
 class FixedWidthTextColumn(ProgressColumn):

@@ -28,7 +28,11 @@ from iiif_downloader.manifest import (
 )
 from iiif_downloader.progress_columns import CompletedTotalColumn, FixedWidthTextColumn
 from iiif_downloader.rate_limiter import RateLimiter
-from iiif_downloader.server_capabilities import probe_server_capabilities
+from iiif_downloader.server_capabilities import (
+    capabilities_from_info,
+    probe_server_capabilities,
+)
+from iiif_downloader.servers import DEFAULT_ADAPTER, ServerAdapter, resolve_adapter
 from iiif_downloader.session_manager import SessionManager
 
 
@@ -73,8 +77,21 @@ class IIIFDownloader:
 
         self.rate_limiter = RateLimiter(fixed_rate=rate_limit)
         self.server_capabilities: Any | None = None
+        self.server_adapter: ServerAdapter = DEFAULT_ADAPTER
         self.probed_image_info: dict[str, Any] | None = None
         self.probed_image_idx: int | None = None
+        self._active_progress: Progress | None = None
+
+    def _log(self, message: str) -> None:
+        """Print a message without corrupting a live progress display.
+
+        Args:
+            message: Rich markup message to print
+        """
+        if self._active_progress is not None:
+            self._active_progress.console.print(message)
+        else:
+            self.console.print(message)
 
     def _display_version(self) -> None:
         """Display the detected IIIF version."""
@@ -98,7 +115,10 @@ class IIIFDownloader:
     def _probe_server_capabilities(
         self, resume: bool, file_tracker: FileTracker | None
     ) -> None:
-        """Probe server capabilities with the first image.
+        """Resolve server capabilities from the first image's info.json.
+
+        Hosts with ``skip_capability_probe`` use declared JSON limits only.
+        Others run HEAD probes for format and max size.
 
         Args:
             resume: Whether resume mode is enabled
@@ -106,8 +126,6 @@ class IIIFDownloader:
         """
         if not self.canvases:
             return
-
-        self.console.print("[dim]Probing server capabilities...[/dim]")
 
         # Find first canvas that will be downloaded (not skipped)
         probe_canvas_idx = None
@@ -128,6 +146,16 @@ class IIIFDownloader:
             if not image_service_url:
                 return
 
+            # Resolve adapter early so Bodleian-style hosts skip HEAD probes
+            self.server_adapter = resolve_adapter(image_service_url)
+            if self.server_adapter.skip_capability_probe:
+                self.console.print(
+                    "[dim]Using declared server capabilities "
+                    f"(adapter={self.server_adapter.name}, no HEAD probe)...[/dim]"
+                )
+            else:
+                self.console.print("[dim]Probing server capabilities...[/dim]")
+
             info = fetch_image_info(
                 image_service_url, self.session_manager, self.verbose
             )
@@ -139,31 +167,61 @@ class IIIFDownloader:
             self.probed_image_idx = probe_canvas_idx
 
             service_id = get_image_service_id_from_info(info)
-            image_size = get_image_size_from_info(info, self.size)
+            if not service_id:
+                return
 
-            if service_id and image_size:
-                limits = get_size_limits_from_info(info)
-                self.server_capabilities = probe_server_capabilities(
-                    service_id,
-                    image_size,
-                    self.session_manager,
-                    upper_bound=limits.max_width,
-                    image_width=info.get("width"),
-                    image_height=info.get("height"),
+            self.server_adapter = resolve_adapter(service_id)
+
+            limits = get_size_limits_from_info(info)
+            use_declared = (
+                self.server_adapter.skip_capability_probe or limits.has_limits
+            )
+
+            if use_declared:
+                # Ensure message matches the path actually taken (adapter may
+                # differ between manifest host and image service host).
+                if not self.server_adapter.skip_capability_probe:
+                    self.console.print(
+                        "[dim]Using declared size limits (skipping HEAD probe)...[/dim]"
+                    )
+                self.server_capabilities = capabilities_from_info(
+                    service_id, info, adapter=self.server_adapter
                 )
-                self._display_server_capabilities()
+                self._display_server_capabilities(from_declared=True)
+                return
+
+            image_size = get_image_size_from_info(info, self.size)
+            if not image_size:
+                return
+
+            self.server_capabilities = probe_server_capabilities(
+                service_id,
+                image_size,
+                self.session_manager,
+                upper_bound=limits.max_width,
+                image_width=info.get("width"),
+                image_height=info.get("height"),
+                adapter=self.server_adapter,
+            )
+            self._display_server_capabilities(from_declared=False)
 
         except Exception:
             # If probing fails, default to safe settings
             pass
 
-    def _display_server_capabilities(self) -> None:
-        """Display discovered server capabilities."""
+    def _display_server_capabilities(self, from_declared: bool = False) -> None:
+        """Display discovered server capabilities.
+
+        Args:
+            from_declared: True when capabilities came from info.json only
+        """
         if not self.server_capabilities:
             return
 
+        source = "declared" if from_declared else "probed"
         self.console.print(
-            f"[dim]Server capabilities:[/dim] "
+            f"[dim]Server capabilities ({source}):[/dim] "
+            f"adapter={self.server_adapter.name}, "
             f"format=.{self.server_capabilities.preferred_format}"
         )
         if self.server_capabilities.max_test_size:
@@ -174,7 +232,12 @@ class IIIFDownloader:
             self.console.print(
                 f"[dim]  Max edge: {self.server_capabilities.max_edge}px[/dim]"
             )
-        if self.server_capabilities.supported_qualities:
+        if from_declared:
+            self.console.print(
+                "[dim]  Size limits: per-image info.json "
+                "(maxWidth/maxHeight/maxArea)[/dim]"
+            )
+        if self.server_capabilities.supported_qualities and not from_declared:
             qualities_str = ", ".join(self.server_capabilities.supported_qualities)
             self.console.print(f"[dim]  Supported qualities: {qualities_str}[/dim]")
         if self.server_capabilities.requires_authentication:
@@ -202,30 +265,35 @@ class IIIFDownloader:
         # Reuse cached info if this is the probed image
         if idx == self.probed_image_idx and self.probed_image_info is not None:
             if self.verbose:
-                self.console.print(
-                    f"[dim]Using cached image info for image {idx + 1}[/dim]"
-                )
+                self._log(f"[dim]Using cached image info for image {idx + 1}[/dim]")
             return self.probed_image_info
 
         image_service_url = get_image_service_from_canvas(canvas, self.version)
         if not image_service_url:
-            self.console.print(
+            self._log(
                 f"[bold red]Error: Could not find image service URL for canvas {idx + 1}[/bold red]"
             )
             return None
 
         # Try to fetch from info.json
-        info = fetch_image_info(image_service_url, self.session_manager, self.verbose)
+        info = fetch_image_info(
+            image_service_url,
+            self.session_manager,
+            self.verbose,
+            console=self._active_progress.console
+            if self._active_progress is not None
+            else self.console,
+        )
 
         # If info.json fetch failed, try extracting from canvas resource
         if not info:
             if self.verbose:
-                self.console.print(
+                self._log(
                     f"[dim]info.json unavailable, extracting info from canvas resource for image {idx + 1}[/dim]"
                 )
             info = get_image_info_from_canvas_resource(canvas, self.version)
             if info and self.verbose:
-                self.console.print(
+                self._log(
                     f"[dim]Extracted: {info.get('width')}x{info.get('height')}, format: {info.get('format', 'jpg')}[/dim]"
                 )
 
@@ -243,21 +311,24 @@ class IIIFDownloader:
         Returns:
             tuple: (service_id, image_size) or None if error
         """
-        # Determine the size to use (honors declared limits and probed max edge)
+        # Determine the size to use (honors declared limits and discovered max)
         max_edge = (
             self.server_capabilities.max_edge if self.server_capabilities else None
         )
         image_size = get_image_size_from_info(info, self.size, max_edge=max_edge)
         if image_size is None:
-            self.console.print(
+            self._log(
                 f"[bold red]Error: No size information available for image {idx + 1}[/bold red]"
             )
             return None
 
+        if self.server_capabilities and self.server_capabilities.max_test_size:
+            image_size = min(image_size, int(self.server_capabilities.max_test_size))
+
         # Construct the image URL
         service_id = get_image_service_id_from_info(info)
         if not service_id:
-            self.console.print(
+            self._log(
                 f"[bold red]Error: No service ID found in image info for image {idx + 1}[/bold red]"
             )
             return None
@@ -324,6 +395,7 @@ class IIIFDownloader:
             download_task,
             self.verbose,
             image_info=image_info,
+            adapter=self.server_adapter,
         )
 
         if not success:
@@ -341,7 +413,7 @@ class IIIFDownloader:
                 if file_size > 1024 * 1024
                 else f"{file_size / 1024:.1f} KB"
             )
-            self.console.print(
+            progress.console.print(
                 f"[dim]Image {idx + 1}: {size_str} "
                 f"({downloaded_bytes} bytes, {chunk_count} chunks)[/dim]"
             )
@@ -361,19 +433,21 @@ class IIIFDownloader:
             main_task: Main progress task
         """
         if isinstance(e, requests.RequestException):
-            self.console.print(
+            progress.console.print(
                 f"[bold red]Error downloading image {idx + 1}:[/bold red] {e}"
             )
             status_code = None
             if hasattr(e, "response") and e.response is not None:
                 status_code = e.response.status_code
-            self.rate_limiter.handle_error(status_code)
+            backoff_msg = self.rate_limiter.handle_error(status_code)
+            if backoff_msg:
+                progress.console.print(f"[yellow]{backoff_msg}[/yellow]")
         elif isinstance(e, KeyError):
-            self.console.print(
+            progress.console.print(
                 f"[bold red]Error accessing manifest data for image {idx + 1}:[/bold red] {e}"
             )
         else:
-            self.console.print(
+            progress.console.print(
                 f"[bold red]Unexpected error processing image {idx + 1}:[/bold red] {e}"
             )
         progress.update(main_task, advance=1)
@@ -426,124 +500,147 @@ class IIIFDownloader:
             console=self.console,
             expand=True,
         ) as progress:
-            # Track statistics
-            skipped_count = 0
-            failed_count = 0
-            newly_downloaded_count = 0
+            self._active_progress = progress
+            try:
+                self._download_all_with_progress(
+                    progress, resume, file_tracker, downloaded_count
+                )
+            finally:
+                self._active_progress = None
 
-            # Main progress task with initial statistics
-            initial_desc = (
+    def _download_all_with_progress(
+        self,
+        progress: Progress,
+        resume: bool,
+        file_tracker: FileTracker,
+        downloaded_count: int,
+    ) -> None:
+        """Run the per-image download loop inside an active Progress context.
+
+        Args:
+            progress: Rich Progress instance
+            resume: Whether resume mode is enabled
+            file_tracker: File tracker for skip/mark logic
+            downloaded_count: Number of files already present at start
+        """
+        # Track statistics
+        skipped_count = 0
+        failed_count = 0
+        newly_downloaded_count = 0
+
+        # Main progress task with initial statistics
+        initial_desc = (
+            f"DL:{newly_downloaded_count:3d} "
+            f"SK:{skipped_count:3d} "
+            f"FL:{failed_count:2d} "
+            f"T:{downloaded_count:3d}/{self.total_images} "
+            f"R:  0.0"
+        )
+        main_task = progress.add_task(
+            initial_desc,
+            total=self.total_images,
+            completed=downloaded_count,
+        )
+
+        def update_status_description() -> None:
+            """Update the progress bar description with current statistics."""
+            current_rate = self.rate_limiter.get_current_rate()
+            desc = (
                 f"DL:{newly_downloaded_count:3d} "
                 f"SK:{skipped_count:3d} "
                 f"FL:{failed_count:2d} "
-                f"T:{downloaded_count:3d}/{self.total_images} "
-                f"R:  0.0"
+                f"T:{file_tracker.get_downloaded_count():3d}/{self.total_images} "
+                f"R:{current_rate:5.1f}"
             )
-            main_task = progress.add_task(
-                initial_desc,
-                total=self.total_images,
-                completed=downloaded_count,
-            )
+            progress.update(main_task, description=desc)
 
-            def update_status_description() -> None:
-                """Update the progress bar description with current statistics."""
-                current_rate = self.rate_limiter.get_current_rate()
-                desc = (
-                    f"DL:{newly_downloaded_count:3d} "
-                    f"SK:{skipped_count:3d} "
-                    f"FL:{failed_count:2d} "
-                    f"T:{file_tracker.get_downloaded_count():3d}/{self.total_images} "
-                    f"R:{current_rate:5.1f}"
-                )
-                progress.update(main_task, description=desc)
-
-            # Iterate through the canvases
-            for idx, canvas in enumerate(self.canvases):
-                try:
-                    # Check if file already exists and resume is enabled
-                    if resume and file_tracker.is_downloaded(idx):
-                        # Try to migrate old filename to new naming scheme if needed
-                        image_format = (
-                            self.server_capabilities.preferred_format
-                            if self.server_capabilities
-                            else "jpeg"
-                        )
-                        target_filename_base = get_filename_from_canvas(
-                            canvas, idx, image_format
-                        )
-                        target_filename = os.path.join(
-                            self.base_filename, target_filename_base
-                        )
-                        migrated = file_tracker.migrate_filename_if_needed(
-                            idx, target_filename
-                        )
-                        if migrated and self.verbose:
-                            self.console.print(
-                                f"[dim]Migrated old filename to: {target_filename_base}[/dim]"
-                            )
-                        skipped_count += 1
-                        update_status_description()
-                        continue
-
-                    # Rate limiting
-                    self.rate_limiter.wait_if_needed()
-
-                    # Fetch image info
-                    info = self._get_image_info(canvas, idx)
-                    if not info:
-                        failed_count += 1
-                        progress.update(main_task, advance=1)
-                        update_status_description()
-                        continue
-
-                    # Prepare download parameters
-                    result = self._prepare_image_download(info, idx)
-                    if result is None:
-                        failed_count += 1
-                        progress.update(main_task, advance=1)
-                        update_status_description()
-                        continue
-
-                    service_id, image_size = result
-
-                    # Download the image (pass image_info for size estimation and canvas for label)
-                    canvas = self.canvases[idx]
-                    success, filename = self._download_single_image(
-                        service_id,
-                        image_size,
-                        idx,
-                        progress,
-                        main_task,
-                        image_info=info,
-                        canvas=canvas,
+        # Iterate through the canvases
+        for idx, canvas in enumerate(self.canvases):
+            try:
+                # Check if file already exists and resume is enabled
+                if resume and file_tracker.is_downloaded(idx):
+                    # Try to migrate old filename to new naming scheme if needed
+                    image_format = (
+                        self.server_capabilities.preferred_format
+                        if self.server_capabilities
+                        else "jpeg"
                     )
+                    target_filename_base = get_filename_from_canvas(
+                        canvas, idx, image_format
+                    )
+                    target_filename = os.path.join(
+                        self.base_filename, target_filename_base
+                    )
+                    migrated = file_tracker.migrate_filename_if_needed(
+                        idx, target_filename
+                    )
+                    if migrated and self.verbose:
+                        self._log(
+                            f"[dim]Migrated old filename to: {target_filename_base}[/dim]"
+                        )
+                    skipped_count += 1
+                    update_status_description()
+                    continue
 
-                    if not success:
-                        failed_count += 1
-                        progress.update(main_task, advance=1)
-                        update_status_description()
-                        continue
+                # Rate limiting
+                self.rate_limiter.wait_if_needed()
 
-                    # Mark as downloaded and update progress
-                    file_tracker.mark_downloaded(idx)
-                    newly_downloaded_count += 1
-                    self.rate_limiter.handle_success()
+                # Fetch image info
+                info = self._get_image_info(canvas, idx)
+                if not info:
+                    failed_count += 1
                     progress.update(main_task, advance=1)
                     update_status_description()
+                    continue
 
-                except Exception as e:
-                    self._handle_download_error(e, idx, progress, main_task)
+                # Prepare download parameters
+                result = self._prepare_image_download(info, idx)
+                if result is None:
                     failed_count += 1
+                    progress.update(main_task, advance=1)
                     update_status_description()
+                    continue
 
-            # Final status
-            self.console.print("\n[bold green]Download completed![/bold green]")
-            self.console.print(f"Downloaded: {newly_downloaded_count}")
-            self.console.print(f"Skipped: {skipped_count}")
-            self.console.print(f"Failed: {failed_count}")
-            self.console.print(
-                f"Total: {file_tracker.get_downloaded_count()}/{self.total_images}"
-            )
+                service_id, image_size = result
+
+                # Download the image (pass image_info for size estimation and canvas for label)
+                canvas = self.canvases[idx]
+                success, filename = self._download_single_image(
+                    service_id,
+                    image_size,
+                    idx,
+                    progress,
+                    main_task,
+                    image_info=info,
+                    canvas=canvas,
+                )
+
+                if not success:
+                    failed_count += 1
+                    progress.update(main_task, advance=1)
+                    update_status_description()
+                    continue
+
+                # Mark as downloaded and update progress
+                file_tracker.mark_downloaded(idx)
+                newly_downloaded_count += 1
+                self.rate_limiter.handle_success()
+                progress.update(main_task, advance=1)
+                update_status_description()
+
+            except Exception as e:
+                self._handle_download_error(e, idx, progress, main_task)
+                failed_count += 1
+                update_status_description()
+
+        # Final status
+        self.console.print("\n[bold green]Download completed![/bold green]")
+        self.console.print(f"Downloaded: {newly_downloaded_count}")
+        self.console.print(f"Skipped: {skipped_count}")
+        self.console.print(f"Failed: {failed_count}")
+        self.console.print(
+            f"Total: {file_tracker.get_downloaded_count()}/{self.total_images}"
+        )
 
     def download_one(self, canvas_index: int) -> None:
         """Download a single canvas/page from the manifest.
@@ -661,6 +758,7 @@ class IIIFDownloader:
                     task,
                     self.verbose,
                     image_info=info,  # Pass image_info for size estimation
+                    adapter=resolve_adapter(service_id),
                 )
 
                 if not success:
