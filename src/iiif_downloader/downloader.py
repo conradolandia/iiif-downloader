@@ -190,7 +190,9 @@ class IIIFDownloader:
                 self._display_server_capabilities(from_declared=True)
                 return
 
-            image_size = get_image_size_from_info(info, self.size)
+            image_size = get_image_size_from_info(
+                info, self.size, size_slack=self.server_adapter.size_limit_slack
+            )
             if not image_size:
                 return
 
@@ -315,7 +317,12 @@ class IIIFDownloader:
         max_edge = (
             self.server_capabilities.max_edge if self.server_capabilities else None
         )
-        image_size = get_image_size_from_info(info, self.size, max_edge=max_edge)
+        image_size = get_image_size_from_info(
+            info,
+            self.size,
+            max_edge=max_edge,
+            size_slack=self.server_adapter.size_limit_slack,
+        )
         if image_size is None:
             self._log(
                 f"[bold red]Error: No size information available for image {idx + 1}[/bold red]"
@@ -706,8 +713,13 @@ class IIIFDownloader:
                 )
                 return
 
+            service_id = get_image_service_id_from_info(info) or image_service_url
+            self.server_adapter = resolve_adapter(service_id)
+
             # Determine image size
-            image_size = get_image_size_from_info(info, self.size)
+            image_size = get_image_size_from_info(
+                info, self.size, size_slack=self.server_adapter.size_limit_slack
+            )
             if image_size is None:
                 self.console.print(
                     f"[bold red]Error: No size information available for canvas "

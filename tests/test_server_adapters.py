@@ -60,3 +60,9 @@ def test_bodleian_fallback_probe_sizes_are_conservative() -> None:
     assert 2000 in sizes
     assert 1000 in sizes
     assert 128 not in sizes  # default adapter includes 128; Bodleian omits it
+
+
+def test_bodleian_size_limit_slack() -> None:
+    """Bodleian subtracts 1px from limit-derived widths to avoid hang-prone sizes."""
+    assert BODLEIAN_ADAPTER.size_limit_slack == 1
+    assert DEFAULT_ADAPTER.size_limit_slack == 0

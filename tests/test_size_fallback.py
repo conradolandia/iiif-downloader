@@ -42,10 +42,10 @@ def test_digirati_declared_size_prefers_full_width() -> None:
     """Level2 + maxWidth must not collapse to the largest sizes[] entry."""
     size = get_image_size_from_info(DIGIRATI_INFO, requested_size=None, max_edge=None)
     # Portrait page: height 6041 > maxWidth 5000 → width capped as max edge
-    expected = int(5000 * 4511 / 6041)
+    expected = (5000 * 4511) // 6041
     assert size == expected
     assert size > 765  # not the largest sizes[] thumbnail
-    assert size * 6041 / 4511 <= 5000 + 1  # scaled height near max edge
+    assert (size * 6041 + 4511 - 1) // 4511 <= 5000
 
 
 def test_digirati_portrait_page_caps_height_via_max_width() -> None:
@@ -56,8 +56,8 @@ def test_digirati_portrait_page_caps_height_via_max_width() -> None:
         "profile": ["http://iiif.io/api/image/2/level2.json", {"maxWidth": 5000}],
     }
     size = get_image_size_from_info(info, requested_size=None, max_edge=None)
-    assert size == int(5000 * 4781 / 6666)
-    assert size * 6666 / 4781 <= 5000
+    assert size == (5000 * 4781) // 6666
+    assert (size * 6666 + 4781 - 1) // 4781 <= 5000
 
 
 def test_canvas_fallback_prefers_canvas_dimensions_over_body() -> None:

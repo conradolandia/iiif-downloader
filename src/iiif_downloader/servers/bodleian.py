@@ -26,6 +26,8 @@ class BodleianAdapter(ServerAdapter):
     skip_content_length_head: bool = True
     skip_capability_probe: bool = True
     default_format: str = "jpg"
+    # Exact maxWidth/maxHeight math can land on sizes that hang (504); stay 1px under.
+    size_limit_slack: int = 1
 
     def should_trust_declared_limits(self, has_declared_limits: bool) -> bool:
         """Trust Bodleian declared size caps whenever they are present.

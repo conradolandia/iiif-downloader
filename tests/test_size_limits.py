@@ -9,10 +9,7 @@ from iiif_downloader.manifest import (
     get_image_size_from_info,
     max_requestable_width,
 )
-from iiif_downloader.server_capabilities import (
-    _derive_max_edge,
-    capabilities_from_info,
-)
+from iiif_downloader.server_capabilities import capabilities_from_info
 from iiif_downloader.servers import BODLEIAN_ADAPTER
 
 # Bodleian Ashmole 304 canvas 49 dimensions / limits
@@ -35,44 +32,33 @@ BODLEIAN_INFO: dict[str, Any] = {
 }
 
 
-def test_derive_max_edge_uses_ceil_not_truncation() -> None:
-    """Probed width must survive reverse max_edge application.
-
-    Truncation gave max_edge=3999 → request width 3362, which hung on Bodleian.
-    Ceil gives max_edge=4000 → width 3363 (the probed working size).
-    """
-    probed_width = 3363
-    max_edge = _derive_max_edge(probed_width, BODLEIAN_WIDTH, BODLEIAN_HEIGHT)
-    assert max_edge == 4000
-
-    # Old truncation behavior (regression guard)
-    truncated_edge = int(probed_width * BODLEIAN_HEIGHT / BODLEIAN_WIDTH)
-    assert truncated_edge == 3999
-    assert int(truncated_edge * BODLEIAN_WIDTH / BODLEIAN_HEIGHT) == 3362
-
+def test_bodleian_declared_limits_use_integer_math() -> None:
+    """Declared maxHeight must not float-overshoot into a hang-prone width."""
     capped = max_requestable_width(
         BODLEIAN_WIDTH,
         BODLEIAN_HEIGHT,
         ImageSizeLimits(max_width=4000, max_height=4000, max_area=None),
-        max_edge=max_edge,
     )
-    assert capped == probed_width
+    # Integer path yields 3363; Bodleian slack then selects 3362
+    assert capped == 3363
+    assert (capped * BODLEIAN_HEIGHT + BODLEIAN_WIDTH - 1) // BODLEIAN_WIDTH <= 4000
 
 
-def test_bodleian_image_size_with_probed_max_edge() -> None:
-    """Full download path must request the probed width, not one pixel less."""
-    probed_width = 3363
-    max_edge = _derive_max_edge(probed_width, BODLEIAN_WIDTH, BODLEIAN_HEIGHT)
+def test_bodleian_slack_requests_3362() -> None:
+    """Bodleian adapter slack avoids exact max size that 504s for some images."""
     size = get_image_size_from_info(
-        BODLEIAN_INFO, requested_size=None, max_edge=max_edge
+        BODLEIAN_INFO,
+        requested_size=None,
+        max_edge=None,
+        size_slack=BODLEIAN_ADAPTER.size_limit_slack,
     )
-    assert size == probed_width
+    assert BODLEIAN_ADAPTER.size_limit_slack == 1
+    assert size == 3362
 
 
-def test_bodleian_declared_limits_without_probe() -> None:
-    """Skip-probe path sizes from info.json alone (no global max_edge)."""
+def test_bodleian_declared_limits_without_slack() -> None:
+    """Without slack, integer cap is 3363 (still within ceil height 4000)."""
     size = get_image_size_from_info(BODLEIAN_INFO, requested_size=None, max_edge=None)
-    # maxHeight 4000 → width int(4000 * 5412 / 6437) == 3363 (same as probed)
     assert size == 3363
 
 

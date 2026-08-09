@@ -27,6 +27,8 @@ class ServerAdapter:
     # When True, skip HEAD capability probes; size is negotiated on GET fallback.
     skip_capability_probe: bool = True
     default_format: str = "jpg"
+    # Subtract from limit-derived widths (Bodleian hangs on some exact max sizes).
+    size_limit_slack: int = 0
 
     def matches_host(self, hostname: str) -> bool:
         """Return True if ``hostname`` belongs to this adapter's host family.

@@ -336,11 +336,40 @@ def get_size_limits_from_info(image_info: dict[str, Any]) -> ImageSizeLimits:
     )
 
 
+def _width_for_max_height(image_width: int, image_height: int, max_height: int) -> int:
+    """Largest request width whose scaled height stays within ``max_height``.
+
+    Uses integer arithmetic so float rounding cannot overshoot (e.g. Bodleian
+    ``int(4000 * 5412 / 6437)`` → 3363 while the true ratio is only slightly
+    above 3363 and some hosts fail on that pixel).
+
+    Args:
+        image_width: Full image width
+        image_height: Full image height
+        max_height: Maximum allowed scaled height
+
+    Returns:
+        int: Safe request width (at least 1)
+    """
+    if image_height <= 0 or max_height <= 0:
+        return 1
+    # floor(max_height * width / height) in integers
+    width = (max_height * image_width) // image_height
+    # Ensure ceil(width * height / image_width) <= max_height
+    while width > 1:
+        scaled_height = (width * image_height + image_width - 1) // image_width
+        if scaled_height <= max_height:
+            break
+        width -= 1
+    return max(1, width)
+
+
 def max_requestable_width(
     image_width: int,
     image_height: int,
     limits: ImageSizeLimits | None = None,
     max_edge: int | None = None,
+    size_slack: int = 0,
 ) -> int:
     """Compute the maximum requestable width for an image under size constraints.
 
@@ -352,11 +381,15 @@ def max_requestable_width(
     whose scaled height would exceed ``maxWidth`` even though width alone is
     under the cap.
 
+    ``size_slack`` subtracts pixels after capping (Bodleian: avoid hang-prone
+    exact max sizes).
+
     Args:
         image_width: Full image width in pixels
         image_height: Full image height in pixels
         limits: Declared service size limits (optional)
         max_edge: Maximum allowed edge length discovered by probing (optional)
+        size_slack: Extra pixels to subtract from the capped width (optional)
 
     Returns:
         int: Maximum requestable width (at least 1)
@@ -371,9 +404,13 @@ def max_requestable_width(
             candidates.append(limits.max_width)
             # maxWidth-only services often enforce it as a max edge
             if limits.max_height is None and image_height > 0:
-                candidates.append(int(limits.max_width * image_width / image_height))
+                candidates.append(
+                    _width_for_max_height(image_width, image_height, limits.max_width)
+                )
         if limits.max_height is not None and image_height > 0:
-            candidates.append(int(limits.max_height * image_width / image_height))
+            candidates.append(
+                _width_for_max_height(image_width, image_height, limits.max_height)
+            )
         if limits.max_area is not None and image_height > 0:
             # width * height_scaled <= max_area
             # height_scaled = width * image_height / image_width
@@ -383,15 +420,21 @@ def max_requestable_width(
     if max_edge is not None and max_edge > 0:
         candidates.append(max_edge)
         if image_height > 0:
-            candidates.append(int(max_edge * image_width / image_height))
+            candidates.append(
+                _width_for_max_height(image_width, image_height, max_edge)
+            )
 
-    return max(1, min(candidates))
+    result = max(1, min(candidates))
+    if size_slack > 0:
+        result = max(1, result - size_slack)
+    return result
 
 
 def get_image_size_from_info(
     image_info: dict[str, Any],
     requested_size: int | None = None,
     max_edge: int | None = None,
+    size_slack: int = 0,
 ) -> int | None:
     """Extract the appropriate image size from image info, handling different API versions.
 
@@ -402,6 +445,7 @@ def get_image_size_from_info(
         image_info: The parsed image info JSON response
         requested_size: Specific size requested by user (optional)
         max_edge: Maximum allowed edge length from server probing (optional)
+        size_slack: Extra pixels to subtract after limit capping (optional)
 
     Returns:
         int: The width to use for the image, or None if no size information available
@@ -441,13 +485,21 @@ def get_image_size_from_info(
     limits = get_size_limits_from_info(image_info)
     if full_width and full_height:
         capped = max_requestable_width(
-            int(full_width), int(full_height), limits, max_edge
+            int(full_width),
+            int(full_height),
+            limits,
+            max_edge,
+            size_slack=size_slack,
         )
         target_size = min(int(target_size), capped)
     elif limits.max_width is not None:
         target_size = min(int(target_size), limits.max_width)
+        if size_slack > 0:
+            target_size = max(1, target_size - size_slack)
     elif max_edge is not None:
         target_size = min(int(target_size), max_edge)
+        if size_slack > 0:
+            target_size = max(1, target_size - size_slack)
 
     return max(1, int(target_size))
 

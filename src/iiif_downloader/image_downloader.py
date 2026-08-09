@@ -426,6 +426,24 @@ def fetch_image_info(
         return None
 
 
+def _is_gateway_timeout_failure(failure_reason: str | None) -> bool:
+    """Return True if a transport error looks like a gateway timeout (504/502).
+
+    Bodleian often returns 504 for hang-prone exact max sizes; treat those as
+    size rejections so we can negotiate a smaller width.
+
+    Args:
+        failure_reason: Exception text or failure label from a download attempt
+
+    Returns:
+        bool: Whether the failure should trigger size negotiation
+    """
+    if not failure_reason:
+        return False
+    lower = failure_reason.lower()
+    return "504" in lower or "502" in lower or "gateway time" in lower
+
+
 def download_url_stream(
     image_url: str,
     filename: str,
@@ -618,7 +636,9 @@ def download_image_stream(
                         last_chunk_count,
                     )
 
-                if failure_reason == "size_rejected":
+                if failure_reason == "size_rejected" or _is_gateway_timeout_failure(
+                    failure_reason
+                ):
                     size_rejected = True
                     all_formats_rejected = False
                     break
