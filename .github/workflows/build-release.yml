@@ -225,48 +225,24 @@ jobs:
       with:
         files: |
           release-assets/*
+        generate_release_notes: true
         body: |
-          ## 🎉 IIIF Downloader Release
+          ## Install
 
-          ### What's New
-          - 🚀 **Startup Progress Feedback** - See what the app is doing during startup
-          - 🎯 **Single Canvas Download** - Download specific pages with `--canvas` option
-          - 📊 **Rich Progress Bars** - Beautiful terminal output with progress tracking
-          - ⚡ **Adaptive Rate Limiting** - Respectful server requests
-          - 🔄 **Resume Functionality** - Continue interrupted downloads
-          - 📄 **Metadata Extraction** - Save manifest information
+          1. Download the executable for your platform from the assets below.
+          2. On Linux/macOS: `chmod +x iiif-downloader-<platform>`
+          3. Run: `./iiif-downloader-<platform> --help`
 
-          ### Features
-          - **Standalone Executable** - No Python installation required
-          - **Cross-Platform** - Works on Linux x86_64
-          - **Multiple Python Versions** - Built with Python 3.11, 3.12, and 3.13
-          - **Rich CLI** - Beautiful terminal interface with progress bars
-          - **Resume Support** - Skip already downloaded files
-          - **Rate Limiting** - Adaptive and configurable request rates
-          - **Single Page Download** - Download specific canvases/pages
-          - **Metadata Export** - Extract and save manifest information
-
-          ### Quick Start
+          ## Quick start
 
           ```bash
-          # Download all images from a manifest
           ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images"
-
-          # Download a specific page
           ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --canvas 5 --output "page5"
-
-          # Resume interrupted download
           ./iiif-downloader-linux-x86_64 --source "https://example.com/manifest.json" --output "images" --resume
           ```
 
-          ### Installation
+          See the [README](https://github.com/conradolandia/iiif-downloader) for full documentation.
 
-          1. Download the appropriate executable for your system
-          2. Make it executable: `chmod +x iiif-downloader-linux-x86_64`
-          3. Run: `./iiif-downloader-linux-x86_64 --help`
-
-          ### Documentation
-
-          See the [README](https://github.com/conradolandia/iiif-downloader) for full documentation and examples.
+          ## Changes
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

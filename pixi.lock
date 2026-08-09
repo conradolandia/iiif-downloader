@@ -358,8 +358,8 @@ packages:
   requires_python: '>=3.8'
 - pypi: ./
   name: iiif-downloader
-  version: 0.8.8
-  sha256: 0637e683e3fa4e5425925f204e9e59ca0fe0deb42320422faaa6fdb597394e1c
+  version: 0.8.9
+  sha256: 27d8bef48d0b596da3e85864c296412360cba585583402726dda6167d76bab53
   requires_dist:
   - requests>=2.31.0
   - rich>=13.0.0
